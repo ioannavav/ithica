@@ -12,7 +12,7 @@ The transformations include:
 ## How to use:
 Build `.so` from `.cpp`:
 ```
- clang++-14 -shared -o [PassName].so -DBLOCKSIZE=X -DINTERLEAVING=Y -DLIBRARYNAME="Z" -fPIC [PassName].cpp `llvm-config --cxxflags`
+ clang++ -shared -o [PassName].so -DBLOCKSIZE=X -DINTERLEAVING=Y -DLIBRARYNAME="Z" -fPIC [PassName].cpp `llvm-config --cxxflags`
 ```
 
 Pass the `.so` on the original `.ll`:
@@ -21,9 +21,26 @@ opt -load ./[PassName].so --enable-new-pm=0 -[passname] -S < [original].ll > [tr
 ```
 Example:
 ```
-clang++-14 -shared -o [PassName].so -DBLOCKSIZE=1 -DINTERLEAVING=1 -DLIBRARYNAME=\"top level code\" -fPIC [PassName].cpp `llvm-config --cxxflags`
+clang++ -shared -o [PassName].so -DBLOCKSIZE=1 -DINTERLEAVING=1 -DLIBRARYNAME=\"top level code\" -fPIC [PassName].cpp `llvm-config --cxxflags`
 opt -load ./ArithmeticPass.so --enable-new-pm=0 -arithmeticpass -S < fpandint.ll > modified_fpandint.ll
 ```
+At runtime, the modified executable needs to be linked against `libpassmmap`, which contains helper C functions. Compile it with:
+```
+clang mmap_file.c -fPIC -Wno-format-security -c -o libpassmmap
+
+```
+
+To produce the `.ll` file from the `.cpp` file, and from that the modified executable:
+```
+clang++ [-O2] -emit-llvm -S fpandint.cc -o fpandint.ll
+clang++ [-static] fpandint.ll ./libpassmmap -o modified_fpandint
+```
+
+Alternatively, to use the pass directly on a C/C++ file and create the transformed executable, without producing its LLVM IR as an intermediate step:
+```
+clang++ [-O2] [-static] -c -flegacy-pass-manager -Xclang -load -Xclang ./[PassName].so fpandint.cc -o modified_fpandint
+```
+
 
 #### Parameter selection:
 - Block size (X): Choose from `1`, `2`, `4`, `8` or `0` (0 inserts checks right before the instruction dependency chain gets broken)
