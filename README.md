@@ -1,13 +1,13 @@
 # Use of ITHICA passes 
 
-We provide examples of how different ITHICA passes transform an example program. 
+We explain how to use the ITHICA compiler passes and provide examples of how different ITHICA passes transform an example input program. 
 For each ITHICA transformation, we present the original LLVM IR code and the transformed code after applying a pass. 
 The transformations include:
 
-- **ArithmeticPass.cpp**: Duplicates arithmetic instructions and checks their results using Functional Consistency (FC) checks. 
-- **MemPass.cpp**: Duplicates memory instructions (loads and stores) and checks their results using Functional Consistency (FC) checks for loads and Round Trip Consistency (RTC) checks for stores. 
-- **MemDivPass.cpp**: Similar to MemPass.cpp, but introduces memory fences and cache line flushes to check different levels of the memory hierarchy.
-- **BranchPass.cpp**: Checks that conditional branches are resolved successfully using Control Flow Integrity (CFI) checks.
+- **ArithmeticPass.cpp**: Implements the Arith transformation of ITHICA paper. It duplicates arithmetic instructions and checks their results using Functional Consistency (FC) checks. 
+- **MemPass.cpp**: Implements the Mem transformation of ITHICA paper. Instruments memory instructions (loads and stores). It duplicates loads, while for stores it inserts loads from the same memory. It checks their results using Functional Consistency (FC) checks for loads and Round Trip Consistency (RTC) checks for stores. 
+- **MemDivPass.cpp**: Implements the MemDiv transformation of ITHICA paper. Similar to MemPass.cpp, but introduces memory fences and cache line flushes to check different levels of the memory hierarchy. 
+- **BranchPass.cpp**: Implements the Br transformation of ITHICA paper. Checks that conditional branches are resolved successfully between the two valid destinations using Control Flow Integrity (CFI) checks. 
 
 ## How to use:
 Build `.so` from `.cpp`:
@@ -43,14 +43,14 @@ clang++ [-O2] [-static] -c -flegacy-pass-manager -Xclang -load -Xclang ./[PassNa
 
 
 #### Parameter selection:
-- Block size (X): Choose from `1`, `2`, `4`, `8` or `0` (0 inserts checks right before the instruction dependency chain gets broken)
-- Interleaving (Y): Choose from `1`, `2`, `4`, `8` or `0` (0 places the duplicate instructions right before the end of the basic block)
-- Library name (Z): Specify any string value. This string is printed upon detecting an SDC. If instrumenting both top-level code and libraries, you can use this to identify the part of the code where the SDC occurred.
+- Block size (X): Choose from `1`, `2`, `4`, `8` or `0` (0 = "dep". Inserts checks right before the instruction dependency chain gets broken)
+- Interleaving (Y): Choose from `1`, `2`, `4`, `8` or `0` (0 = "max". Places the duplicate instructions right before the end of the basic block)
+- Library name (Z): Specify your program's/library's name. This string is printed upon detecting an error. If instrumenting both top-level code and libraries, you can use this to identify the part of the code where the error occurred.
 
 #### Dependencies:
 Version of clang used: 14.0.6
 
-## 1) Example use of ITHICA<sub>A
+## 1) Example use of Arith transformation
 ### Original .ll code:
 ```llvm
 define dso_local noundef i32 @_Z11addIntegersii(i32 noundef %0, i32 noundef %1) #0 {
@@ -94,7 +94,7 @@ then:
   ret float %7
 }
 ```
-## 2) Example use of ITHICA<sub>M
+## 2) Example use of Mem transformation
 ### After applying MemPass.cpp:
 ```llvm
 define dso_local noundef i32 @_Z11addIntegersii(i32 noundef %0, i32 noundef %1) #0 {
@@ -128,7 +128,7 @@ then:
 }
 ```
 
-## 3) Example use of ITHICA<sub>MD
+## 3) Example use of MemDiv transformation
 ### After applying MemDivPass.cpp:
 ```llvm
 define dso_local noundef i32 @_Z11addIntegersii(i32 noundef %0, i32 noundef %1) #0 {
@@ -180,7 +180,7 @@ then:
 }
 ```
 
-## 4) Example use of ITHICA<sub>B
+## 4) Example use of Br transformation
 ### Original .ll code:
 ```llvm
 define i32 @main(i32 %argc, i8** %argv) {
