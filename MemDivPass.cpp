@@ -89,16 +89,17 @@ namespace {
 
 		bool isExcludedFunction(Function *F) {
 			static const std::set<std::string> ExcludedFunctions = {
-				//Excluded functions for giving false positives dues to multithreading. They are safe for arithmetic but not memory instructions.
-				"ossl_lh_strcasehash",
-				"OPENSSL_LH_insert",
-				"CRYPTO_set_ex_data", 
-				"ossl_sa_set",
-				"CRYPTO_zalloc",
-				"OPENSSL_LH_doall_arg",
-				"obj_name_cmp",
-				"_ZN8tcmalloc17tcmalloc_internal",
-				"SymbolizeEPK"
+				//Excluded functions.
+				//"ossl_lh_strcasehash",
+				//"OPENSSL_LH_insert",
+				//"CRYPTO_set_ex_data", 
+				//"ossl_sa_set",
+				//"CRYPTO_zalloc",
+				//"OPENSSL_LH_doall_arg",
+				//"obj_name_cmp",
+				//"_ZN8tcmalloc17tcmalloc_internal",
+				//"SymbolizeEPK"
+				"Add function to exclude"
 			};
 			for (const auto &excludedName : ExcludedFunctions) {
 				if (F->getName().str().find(excludedName) != std::string::npos) {
@@ -110,10 +111,26 @@ namespace {
 
 
 		bool runOnFunction(Function &F) override {
-			// These need to be set from the command line. Alternatively, give them a value here.
-			int blockSize = BLOCKSIZE;
-			int interleaving = INTERLEAVING;
-			const char* libraryName = LIBRARYNAME;
+			int blockSize = 
+			#ifdef BLOCKSIZE
+				BLOCKSIZE;
+			#else
+				1; 
+			#endif
+		
+			int interleaving = 
+			#ifdef INTERLEAVING
+				INTERLEAVING;
+			#else
+				1; 
+			#endif
+		
+			const char* libraryName = 
+			#ifdef LIBRARYNAME
+				LIBRARYNAME;
+			#else
+				"top-level code"; 
+			#endif
 
 			totalFunctions ++;
 			bool MEMORY_ON = true;
@@ -592,7 +609,7 @@ namespace {
 
 					// Call print_cpu_id function on mismatch
 					elseBuilder.CreateCall(printCPUFunc);
-					llvm::Value* libraryNameArg = elseBuilder.CreateGlobalStringPtr(LIBRARYNAME);
+					llvm::Value* libraryNameArg = elseBuilder.CreateGlobalStringPtr(libraryName);
 					elseBuilder.CreateCall(printDateFunc, libraryNameArg);
 
 					Value* funcName = elseBuilder.CreateGlobalStringPtr(F.getName());
