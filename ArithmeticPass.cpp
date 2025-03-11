@@ -158,10 +158,27 @@ namespace {
 
 
 		bool runOnFunction(Function &F) override {
-			// These need to be set from the command line. Alternatively, give them a value here.
-		  	int blockSize = BLOCKSIZE;
-			int interleaving = INTERLEAVING;
-			const char* libraryName = LIBRARYNAME;
+			int blockSize = 
+			#ifdef BLOCKSIZE
+				BLOCKSIZE;
+			#else
+				1; 
+			#endif
+		
+			int interleaving = 
+			#ifdef INTERLEAVING
+				INTERLEAVING;
+			#else
+				1; 
+			#endif
+		
+			const char* libraryName = 
+			#ifdef LIBRARYNAME
+				LIBRARYNAME;
+			#else
+				"top-level code"; 
+			#endif
+
 			
 			totalFunctions ++;
 
@@ -508,7 +525,7 @@ namespace {
 
 					// Call print_cpu_id function on mismatch
 					elseBuilder.CreateCall(printCPUFunc);
-					llvm::Value* libraryNameArg = elseBuilder.CreateGlobalStringPtr(LIBRARYNAME);
+					llvm::Value* libraryNameArg = elseBuilder.CreateGlobalStringPtr(libraryName);
 					elseBuilder.CreateCall(printDateFunc, libraryNameArg);
 
 					Value* funcName = elseBuilder.CreateGlobalStringPtr(F.getName());
