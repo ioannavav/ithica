@@ -49,7 +49,6 @@ namespace {
             return true; // Exclude all other instructions
         }
 
-        // Basic blocks that contain Resume or Cleanup instructions are not safe to process
         bool containsResumeOrCleanupInstruction(BasicBlock &BB) {
             for (Instruction &I : BB) {
                 if (isa<ResumeInst>(&I) || isa<LandingPadInst>(&I)) {
