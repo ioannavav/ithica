@@ -205,7 +205,7 @@ struct ArithMemDivBrPass : public FunctionPass {
 
     IRBuilder<> builder(firstInst);
     // Load the "branchCheckingON"
-    Value *checkingOn = builder.CreateLoad(Type::getInt1Ty(Ctx), branchCheckingON);
+    Value *checkingOn = builder.CreateLoad(Type::getInt1Ty(Ctx), branchCheckingON, true);
 
     // Split the block
     BasicBlock *origBB = BB->splitBasicBlock(firstInst, "origBB");
@@ -219,7 +219,7 @@ struct ArithMemDivBrPass : public FunctionPass {
     // checkBB => compare stored ID with current block ID
     IRBuilder<> checkBuilder(checkBB);
     Value *storedID = checkBuilder.CreateLoad(Type::getInt32Ty(Ctx),
-                                              branchTargetAddress);
+                                              branchTargetAddress, true);
     Value *currentID = ConstantInt::get(Type::getInt32Ty(Ctx), blockID);
     Value *isCorrect = checkBuilder.CreateICmpEQ(storedID, currentID);
 
@@ -230,7 +230,7 @@ struct ArithMemDivBrPass : public FunctionPass {
 
     // thenBB => turn OFF checking, jump to origBB
     IRBuilder<> thenBuilder(thenBB);
-    thenBuilder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx),  false),
+    thenBuilder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true),
                             branchCheckingON);
     thenBuilder.CreateBr(origBB);
 
@@ -690,7 +690,7 @@ struct ArithMemDivBrPass : public FunctionPass {
                                                 blockIDMap[falseBB]);
               Value *cond = branchInst->getCondition();
               Value *expectedID = bld.CreateSelect(cond, trueID, falseID);
-              bld.CreateStore(expectedID, branchTargetAddress);
+              bld.CreateStore(expectedID, branchTargetAddress, true);
               bld.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true),
                               branchCheckingON);
 
