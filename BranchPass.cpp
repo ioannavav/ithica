@@ -125,7 +125,7 @@ namespace {
             IRBuilder<> checkBuilder(checkBB);
 
             // Load the stored branch target ID
-            Value *storedID = checkBuilder.CreateLoad(Type::getInt32Ty(Ctx), branchTargetAddress);
+            Value *storedID = checkBuilder.CreateLoad(Type::getInt32Ty(Ctx), branchTargetAddress, true);
 
             // Compare it with the current block ID
             Value *currentBlockIDVal = ConstantInt::get(Type::getInt32Ty(Ctx), blockID);
@@ -140,7 +140,7 @@ namespace {
 
             // Build the thenBB block (executed if IDs match)
             IRBuilder<> thenBuilder(thenBB);
-            thenBuilder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), false), branchCheckingON);
+            thenBuilder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true), branchCheckingON);
             thenBuilder.CreateBr(origBB);  // Continue to the original instructions
 
             // Build the errorBB block (executed if IDs do not match)
@@ -260,7 +260,7 @@ namespace {
                         Value *expectedID = builder.CreateSelect(cond, trueTargetID, falseTargetID);
 
                         // Store the selected ID in the global variable branchTargetAddress
-                        builder.CreateStore(expectedID, branchTargetAddress);
+                        builder.CreateStore(expectedID, branchTargetAddress, true);
                         builder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true), branchCheckingON);
 
                         // Insert ID checks in the target basic blocks
