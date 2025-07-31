@@ -4,12 +4,12 @@ We explain how to use the ITHICA compiler passes and provide examples of how dif
 For each ITHICA transformation, we present the original LLVM IR code and the transformed code after applying a pass. 
 The transformations include:
 
-- **ArithmeticPass.cpp**: Implements the Arith transformation of ITHICA paper. It duplicates arithmetic instructions and checks their results using Functional Consistency (FC) checks. 
-- **MemPass.cpp**: Implements the Mem transformation of ITHICA paper. Instruments memory instructions (loads and stores). It duplicates loads, while for stores it inserts loads from the same memory. It checks their results using Functional Consistency (FC) checks for loads and Round Trip Consistency (RTC) checks for stores. 
+- **ArithmeticPass.cpp**: Implements the Arith transformation of ITHICA paper. It duplicates arithmetic instructions and checks their results.
+- **MemPass.cpp**: Implements the Mem transformation of ITHICA paper. Instruments memory instructions (loads and stores). It duplicates loads, while for stores it inserts loads from the same memory. 
 - **MemDivPass.cpp**: Implements the MemDiv transformation of ITHICA paper. Similar to MemPass.cpp, but introduces memory fences and cache line flushes to check different levels of the memory hierarchy. 
-- **BranchPass.cpp**: Implements the Br transformation of ITHICA paper. Checks that conditional branches are resolved successfully between the two valid destinations using Control Flow Integrity (CFI) checks.
+- **BranchPass.cpp**: Implements the Br transformation of ITHICA paper. Checks that conditional branches are resolved successfully between the two valid destinations.
 
-- The remaining 3 passes (ArithMemPass, ArithMemDivPass, ArithMemDivBrPass) are merged versions of the main four passes.
+- The remaining 3 passes (ArithMemPass, ArithMemDivPass, ArithMemDivBrPass) are merged (combined) versions of the main four passes.
 
 ## How to use:
 Build `.so` from `.cpp`:
