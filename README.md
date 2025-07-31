@@ -211,12 +211,12 @@ define i32 @main(i32 %argc, i8** %argv) {
 entry:
   %cmp = icmp sgt i32 %argc, 0
   %0 = select i1 %cmp, i32 2, i32 3
-  store i32 %0, i32* @llvmPassBranchTargetAddress, align 4
-  store i1 true, i1* @llvmPassBranchCheckingON, align 1
+  store volatile i32 %0, i32* @llvmPassBranchTargetAddress, align 4
+  store volatile i1 true, i1* @llvmPassBranchCheckingON, align 1
   br i1 %cmp, label %if_true, label %if_false
 
 if_true:                                          ; preds = %entry
-  %1 = load i1, i1* @llvmPassBranchCheckingON, align 1
+  %1 = load volatile i1, i1* @llvmPassBranchCheckingON, align 1
   br i1 %1, label %checkBB, label %skipCheckBB
 
 origBB:                                           ; preds = %skipCheckBB, %thenBB
@@ -225,7 +225,7 @@ origBB:                                           ; preds = %skipCheckBB, %thenB
   br label %end
 
 if_false:                                         ; preds = %entry
-  %3 = load i1, i1 0, align 1
+  %3 = load volatile i1, i1 0, align 1
   br i1 %3, label %checkBB2, label %skipCheckBB3
 
 origBB1:                                          ; preds = %skipCheckBB3, %thenBB4
@@ -237,7 +237,7 @@ end:                                              ; preds = %origBB1, %origBB
   ret i32 0
 
 checkBB:                                          ; preds = %if_true
-  %5 = load i32, i32* @llvmPassBranchTargetAddress, align 4
+  %5 = load volatile i32, i32* @llvmPassBranchTargetAddress, align 4
   %6 = icmp eq i32 %5, 2
   br i1 %6, label %thenBB, label %errorBB
 
@@ -245,7 +245,7 @@ skipCheckBB:                                      ; preds = %if_true
   br label %origBB
 
 thenBB:                                           ; preds = %checkBB
-  store i1 false, i1* @llvmPassBranchCheckingON, align 1
+  store volatile i1 false, i1* @llvmPassBranchCheckingON, align 1
   br label %origBB
 
 errorBB:
