@@ -15,6 +15,7 @@
 #include <iterator>
 #include <vector>
 #include <map>
+#include <set>
 
 using namespace llvm;
 static std::map<unsigned, Function*> NoOpFunctionRegistry;
@@ -27,7 +28,7 @@ namespace {
         static unsigned blockCounter; // Basic block ID of the function
         static unsigned totalBasicBlocks; // Total number of basic blocks across functions
         static bool countedBlocks; // Ensure basic blocks are counted only once    
-        static unsigned totalFunctions;
+        static unsigned totalFunctions; // Total number of functions processed
 
         std::string instructionToString(Instruction *I) {
             std::string str;
@@ -89,10 +90,9 @@ namespace {
 
         bool isExcludedFunction(Function *F) {
             static const std::set<std::string> ExcludedFunctions = {
-                // Excluded functions
-                // "ossl_lh_strcasehash", "OPENSSL_LH_insert", "CRYPTO_set_ex_data", "ossl_sa_set", 
-                // "CRYPTO_zalloc", "OPENSSL_LH_doall_arg", "obj_name_cmp", "_ZN8tcmalloc17tcmalloc_internal", "SymbolizeEPK"
-                "Add function to exclude"
+                // "Add function to exclude"
+                "ossl_lh_strcasehash", "OPENSSL_LH_insert", "CRYPTO_set_ex_data", "ossl_sa_set", 
+                "CRYPTO_zalloc", "OPENSSL_LH_doall_arg", "obj_name_cmp", "_ZN8tcmalloc17tcmalloc_internal", "SymbolizeEPK"
             };
             for (const auto &excludedName : ExcludedFunctions) {
                 if (F->getName().str().find(excludedName) != std::string::npos) {
@@ -100,6 +100,68 @@ namespace {
                 }
             }
             return false;
+        }
+
+        // i1 iff a==b; FP bitwise; aggregates element-wise. nullptr = unsupported.
+        Value *emitEqualityCheck(IRBuilder<> &B, Value *a, Value *b, const DataLayout &DL) {
+            Type *T = a->getType();
+            LLVMContext &C = B.getContext();
+
+            if (T->isIntegerTy()) {
+                return B.CreateICmpEQ(a, b, "cmp_result" + std::to_string(blockCounter));
+            }
+            if (T->isFloatingPointTy()) {
+                // Compare the raw bits so that bit-identical NaNs count as equal.
+                unsigned bits = T->getScalarSizeInBits();
+                Type *intTy = IntegerType::get(C, bits);
+                Value *ia = B.CreateBitCast(a, intTy, "fp_bits1");
+                Value *ib = B.CreateBitCast(b, intTy, "fp_bits2");
+                return B.CreateICmpEQ(ia, ib, "cmp_result" + std::to_string(blockCounter));
+            }
+            if (T->isPointerTy()) {
+                Type *intTy = B.getIntPtrTy(DL);
+                Value *ia = B.CreatePtrToInt(a, intTy, "ptr_to_int1");
+                Value *ib = B.CreatePtrToInt(b, intTy, "ptr_to_int2");
+                return B.CreateICmpEQ(ia, ib, "ptr_cmp_result");
+            }
+            if (auto *vecTy = dyn_cast<VectorType>(T)) {
+                unsigned numElements = vecTy->getElementCount().getKnownMinValue();
+                Value *agg = ConstantInt::getTrue(C);
+                for (unsigned i = 0; i < numElements; ++i) {
+                    Value *idx = ConstantInt::get(Type::getInt32Ty(C), i);
+                    Value *e1 = B.CreateExtractElement(a, idx, "vec_elem1");
+                    Value *e2 = B.CreateExtractElement(b, idx, "vec_elem2");
+                    Value *ec = emitEqualityCheck(B, e1, e2, DL);
+                    if (!ec) return nullptr;
+                    agg = B.CreateAnd(agg, ec, "vec_cmp_agg");
+                }
+                return agg;
+            }
+            if (auto *structTy = dyn_cast<StructType>(T)) {
+                unsigned numElements = structTy->getNumElements();
+                Value *agg = ConstantInt::getTrue(C);
+                for (unsigned i = 0; i < numElements; ++i) {
+                    Value *e1 = B.CreateExtractValue(a, i, "struct_elem1");
+                    Value *e2 = B.CreateExtractValue(b, i, "struct_elem2");
+                    Value *ec = emitEqualityCheck(B, e1, e2, DL);
+                    if (!ec) return nullptr;
+                    agg = B.CreateAnd(agg, ec, "struct_cmp_agg");
+                }
+                return agg;
+            }
+            if (auto *arrTy = dyn_cast<ArrayType>(T)) {
+                unsigned numElements = (unsigned)arrTy->getNumElements();
+                Value *agg = ConstantInt::getTrue(C);
+                for (unsigned i = 0; i < numElements; ++i) {
+                    Value *e1 = B.CreateExtractValue(a, i, "arr_elem1");
+                    Value *e2 = B.CreateExtractValue(b, i, "arr_elem2");
+                    Value *ec = emitEqualityCheck(B, e1, e2, DL);
+                    if (!ec) return nullptr;
+                    agg = B.CreateAnd(agg, ec, "arr_cmp_agg");
+                }
+                return agg;
+            }
+            return nullptr;
         }
 
         bool runOnFunction(Function &F) override {
@@ -132,12 +194,12 @@ namespace {
             }
 
             LLVMContext &Ctx = F.getContext();
-            errs() << " Running on function: " << F.getName() <<  "  with ID: " <<  totalFunctions << "\n";
+            errs() << "Running on function: " << F.getName() <<  "  with ID: " <<  totalFunctions << "\n";
 
             // Use fprintf to print in the stderr (unbuffered)
             FunctionCallee fprintFunc = F.getParent()->getOrInsertFunction(
-                    "fprintFunc", FunctionType::get(IntegerType::getInt32Ty(Ctx),
-                        PointerType::get(Type::getInt8Ty(Ctx), 0)));
+                    "fprintFunc", FunctionType::get(Type::getVoidTy(Ctx),
+                        Type::getInt8PtrTy(Ctx), true));
 
             FunctionCallee printCPUFunc = F.getParent()->getOrInsertFunction("print_cpu_id",
                     FunctionType::get(Type::getVoidTy(Ctx), false));
@@ -220,9 +282,37 @@ namespace {
                 allocaBuilder.SetInsertPoint(BB->getFirstNonPHI());
 
                 unsigned instCounter = 0;
+
+                // Aliasing protection
+                std::vector<Instruction*> pendingLoadClones;
+                Instruction *lastLoadInst = nullptr; // anchor: insert the batch after this load
+                Instruction *prevInst = nullptr;     // previous instrumented op, for gap scanning
+                int maxLoadBatch = (interleaving <= 0)
+                        ? (int)originalInstructions.size() + 1 : interleaving;
+                auto flushLoadClones = [&](Instruction *anchor) {
+                    Instruction *at = anchor;
+                    for (Instruction *lc : pendingLoadClones) {
+                        lc->insertAfter(at);
+                        at = lc;
+                    }
+                    pendingLoadClones.clear();
+                };
+                auto writeBetween = [&](Instruction *from, Instruction *to) -> bool {
+                    if (!from) return false;
+                    for (Instruction *it = from->getNextNode(); it && it != to; it = it->getNextNode()) {
+                        if (it->mayWriteToMemory()) return true;
+                    }
+                    return false;
+                };
+
                 // Loop through each instruction of the basic block
                 for (Instruction *Inst : originalInstructions) {
                     instCounter++;
+                    if (!pendingLoadClones.empty() && writeBetween(prevInst, Inst)) {
+                        flushLoadClones(lastLoadInst);
+                        lastLoadInst = nullptr;
+                    }
+                    prevInst = Inst;
                     IRBuilder<> builder(Inst);
                     std::vector<Value*> clonedOperands;
                     std::vector<Value*> dependencyOperands;
@@ -232,7 +322,11 @@ namespace {
 
                     // Duplicate Stores
                     if (isa<StoreInst>(Inst)) {
-                        IRBuilder<> storeBuilder(BB);	
+                        if (!pendingLoadClones.empty()) {
+                            flushLoadClones(lastLoadInst);
+                            lastLoadInst = nullptr;
+                        }
+                        IRBuilder<> storeBuilder(BB);
                         storeBuilder.SetInsertPoint(Inst->getNextNode());
                         Value *storedValue = Inst->getOperand(0);
                         Value *storeAddress = Inst->getOperand(1);
@@ -249,15 +343,16 @@ namespace {
                             continue;
                         }
                         // Ensure the pointer's element type matches the stored value's type
-                        Type *storedType = storeAddress->getType()->getPointerElementType();
-                        if (storedType != storedValue->getType()) {
-                            errs() << "Pointer element type does not match stored value type: "
-                            << *storedType << " vs " << *storedValue->getType() << "\n";
-                            continue;
-                        }
+                        // Type *storedType = storeAddress->getType()->getPointerElementType();
+                        // if (storedType != storedValue->getType()) {
+                        //     errs() << "Pointer element type does not match stored value type: "
+                        //     << *storedType << " vs " << *storedValue->getType() << "\n";
+                        //     continue;
+                        // }
 
                         // Create a volatile load after the store
-                        LoadInst *reloadedValue = storeBuilder.CreateLoad(storeAddress->getType()->getPointerElementType(), storeAddress, true); 
+                        // LoadInst *reloadedValue = storeBuilder.CreateLoad(storeAddress->getType()->getPointerElementType(), storeAddress, true);
+                        LoadInst *reloadedValue = storeBuilder.CreateLoad(storedValue->getType(), storeAddress, true);
                         reloadedValue->setAlignment(dyn_cast<StoreInst>(Inst)->getAlign());
                         reloadedValue->setVolatile(true); // Make the load volatile
                         clonedInst = reloadedValue;
@@ -296,10 +391,12 @@ namespace {
                                 clonedInst->setOperand(j, dependencyOperands[j]);
                         }
 
-                        if (interleaving == 1 || isa<LoadInst>(Inst)) {
-                            clonedInst->insertAfter(Inst);
-                        } else if (interleaving == 0) {
-                            clonedInst->insertBefore(BB->getTerminator());
+                        // Aliasing protection
+                        pendingLoadClones.push_back(clonedInst);
+                        lastLoadInst = Inst;
+                        if ((int)pendingLoadClones.size() >= maxLoadBatch) {
+                            flushLoadClones(Inst);
+                            lastLoadInst = nullptr;
                         }
 
                         // Add the cloned instruction to clonedInsts
@@ -322,164 +419,19 @@ namespace {
                             || (blockSize != 0 && (instCounter % blockSize == 0 || instCounter == originalInstructions.size()))) {
 
                                 if (cloneMap.find(lastInst) == cloneMap.end()) {
-                                    errs() << "ERROR: No instruction in cloneMap!!!!!!!!!" << "\n";
+                                    errs() << "Error: No instruction in cloneMap!" << "\n";
                                 } else {
                                     clonedLastInst = cloneMap[lastInst][0];
                                 }
 
                                 IRBuilder<> builder(BB->getTerminator());
-                                Value *cmp = nullptr;
-
-                                if (lastValue) {
-                                    if (lastValue->getType()->isIntegerTy() && clonedLastInst->getType()->isIntegerTy()) {
-                                        cmp = builder.CreateICmpEQ(lastValue, clonedLastInst, "cmp_result" + std::to_string(blockCounter));
-                                    } else if (lastValue->getType()->isFloatingPointTy() && clonedLastInst->getType()->isFloatingPointTy()) {
-                                        cmp = builder.CreateFCmpOEQ(lastValue, clonedLastInst, "cmp_result" + std::to_string(blockCounter));
-                                    } else if (isa<VectorType>(lastValue->getType())) {
-                                        // Vector comparison code
-                                        auto *vecType = cast<VectorType>(lastValue->getType());
-                                        Value *vectorCmp = ConstantInt::getTrue(builder.getContext());
-                                        unsigned numElements = vecType->getElementCount().getKnownMinValue(); 
-                                        for (unsigned i = 0; i < numElements; ++i) {
-                                            Value *elem1 = builder.CreateExtractElement(lastValue, ConstantInt::get(Type::getInt32Ty(builder.getContext()), i), "vec_elem1");
-                                            Value *elem2 = builder.CreateExtractElement(clonedLastInst, ConstantInt::get(Type::getInt32Ty(builder.getContext()), i), "vec_elem2");
-                                            Value *elemCmp = nullptr;
-                                            if (vecType->getElementType()->isIntegerTy()) {
-                                                elemCmp = builder.CreateICmpEQ(elem1, elem2);
-                                            } else if (vecType->getElementType()->isFloatingPointTy()) {
-                                                elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-                                            } else if (vecType->getElementType()->isPointerTy()) {
-                                                auto *intType = builder.getIntPtrTy(clonedLastInst->getModule()->getDataLayout());
-                                                Value *intVal1 = builder.CreatePtrToInt(elem1, intType, "ptr_to_int1");
-                                                Value *intVal2 = builder.CreatePtrToInt(elem2, intType, "ptr_to_int2");
-                                                elemCmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-                                            } else {
-                                                errs() << "Unsupported vector element type for comparison for: " << *lastInst << " with type: ";
-                                                lastValue->getType()->print(errs());
-                                                errs() << "\n";
-                                                vectorCmp = nullptr;
-                                                break;
-                                            }
-                                            vectorCmp = builder.CreateAnd(vectorCmp, elemCmp, "vec_cmp_agg");
-                                        }
-                                        cmp = vectorCmp;
-                                        if (cmp == nullptr) {
-                                            errs() << "Vector comparison failed! " << *(Inst) << "\n";
-                                        }
-                                    } else if (lastValue->getType()->isPointerTy() || clonedLastInst->getType()->isPointerTy()) {
-                                        auto *intType = builder.getIntPtrTy(clonedLastInst->getModule()->getDataLayout());
-                                        Value *intVal1 = builder.CreatePtrToInt(lastValue, intType, "ptr_to_int1");
-                                        Value *intVal2 = builder.CreatePtrToInt(clonedLastInst, intType, "ptr_to_int2");
-                                        cmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-                                    } else if (isa<StructType>(lastValue->getType())) {
-                                        // Struct comparison code
-                                        auto *structType = cast<StructType>(lastValue->getType());
-                                        Value *structCmp = ConstantInt::getTrue(builder.getContext());
-                                        unsigned numElements = structType->getNumElements();
-                                        for (unsigned i = 0; i < numElements; ++i) {
-                                            Value *elem1 = builder.CreateExtractValue(lastValue, i, "struct_elem1");
-                                            Value *elem2 = builder.CreateExtractValue(clonedLastInst, i, "struct_elem2");
-                                            Value *elemCmp = nullptr;
-                                            if (structType->getElementType(i)->isIntegerTy()) {
-                                                elemCmp = builder.CreateICmpEQ(elem1, elem2);
-                                            } else if (structType->getElementType(i)->isFloatingPointTy()) {
-                                                elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-                                            } else if (structType->getElementType(i)->isPointerTy()) {
-                                                auto *intType = builder.getIntPtrTy(clonedLastInst->getModule()->getDataLayout());
-                                                Value *intVal1 = builder.CreatePtrToInt(elem1, intType, "ptr_to_int1");
-                                                Value *intVal2 = builder.CreatePtrToInt(elem2, intType, "ptr_to_int2");
-                                                elemCmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-                                            } else {
-                                                errs() << "Unsupported struct element type for comparison.\n";
-                                                structCmp = nullptr;
-                                                break;
-                                            }
-                                            structCmp = builder.CreateAnd(structCmp, elemCmp, "struct_cmp_agg");
-                                        }
-                                        cmp = structCmp;
-                                        if (cmp == nullptr) {
-                                            errs() << "Struct comparison failed! " << *(Inst) << "\n";
-                                        }
-                                    } else {
-                                        errs() << "!!!!!! FIX IT: NO_COMPARISON SUPPORTED YET for instruction: " << *Inst << " is of type: ";
-                                        lastValue->getType()->print(errs());
-                                        errs() << "\n";
-                                    }
-                                } else {
-                                    if (lastInst->getType()->isIntegerTy() && clonedLastInst->getType()->isIntegerTy()) {
-                                        cmp = builder.CreateICmpEQ(lastInst, clonedLastInst, "cmp_result" + std::to_string(blockCounter));
-                                    } else if (lastInst->getType()->isFloatingPointTy() && clonedLastInst->getType()->isFloatingPointTy()) {
-                                        cmp = builder.CreateFCmpOEQ(lastInst, clonedLastInst, "cmp_result" + std::to_string(blockCounter));
-                                    } else if (isa<VectorType>(lastInst->getType())) {
-                                        // Vector comparison code
-                                        auto *vecType = cast<VectorType>(lastInst->getType());
-                                        Value *vectorCmp = ConstantInt::getTrue(builder.getContext());
-                                        unsigned numElements = vecType->getElementCount().getKnownMinValue(); 
-                                        for (unsigned i = 0; i < numElements; ++i) {
-                                            Value *elem1 = builder.CreateExtractElement(lastInst, ConstantInt::get(Type::getInt32Ty(builder.getContext()), i), "vec_elem1");
-                                            Value *elem2 = builder.CreateExtractElement(clonedLastInst, ConstantInt::get(Type::getInt32Ty(builder.getContext()), i), "vec_elem2");
-                                            Value *elemCmp = nullptr;
-                                            if (vecType->getElementType()->isIntegerTy()) {
-                                                elemCmp = builder.CreateICmpEQ(elem1, elem2);
-                                            } else if (vecType->getElementType()->isFloatingPointTy()) {
-                                                elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-                                            } else if (vecType->getElementType()->isPointerTy()) {
-                                                auto *intType = builder.getIntPtrTy(clonedLastInst->getModule()->getDataLayout());
-                                                Value *intVal1 = builder.CreatePtrToInt(elem1, intType, "ptr_to_int1");
-                                                Value *intVal2 = builder.CreatePtrToInt(elem2, intType, "ptr_to_int2");
-                                                elemCmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-                                            } else {
-                                                errs() << "Unsupported vector element type for comparison for: " << *lastInst << " with type: ";
-                                                lastInst->getType()->print(errs());
-                                                errs() << "\n";
-                                                vectorCmp = nullptr;
-                                                break;
-                                            }
-                                            vectorCmp = builder.CreateAnd(vectorCmp, elemCmp, "vec_cmp_agg");
-                                        }
-                                        cmp = vectorCmp;
-                                        if (cmp == nullptr) {
-                                            errs() << "Vector comparison failed! " << *(Inst) << "\n";
-                                        }
-                                    } else if (lastInst->getType()->isPointerTy() || clonedLastInst->getType()->isPointerTy()) {
-                                        auto *intType = builder.getIntPtrTy(clonedLastInst->getModule()->getDataLayout());
-                                        Value *intVal1 = builder.CreatePtrToInt(lastInst, intType, "ptr_to_int1");
-                                        Value *intVal2 = builder.CreatePtrToInt(clonedLastInst, intType, "ptr_to_int2");
-                                        cmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");	
-                                    } else if (isa<StructType>(lastInst->getType())) {
-                                        // Struct comparison code
-                                        auto *structType = cast<StructType>(lastInst->getType());
-                                        Value *structCmp = ConstantInt::getTrue(builder.getContext());
-                                        unsigned numElements = structType->getNumElements();
-                                        for (unsigned i = 0; i < numElements; ++i) {
-                                            Value *elem1 = builder.CreateExtractValue(lastInst, i, "struct_elem1");
-                                            Value *elem2 = builder.CreateExtractValue(clonedLastInst, i, "struct_elem2");
-                                            Value *elemCmp = nullptr;
-                                            if (structType->getElementType(i)->isIntegerTy()) {
-                                                elemCmp = builder.CreateICmpEQ(elem1, elem2);
-                                            } else if (structType->getElementType(i)->isFloatingPointTy()) {
-                                                elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-                                            } else if (structType->getElementType(i)->isPointerTy()) {
-                                                auto *intType = builder.getIntPtrTy(clonedLastInst->getModule()->getDataLayout());
-                                                Value *intVal1 = builder.CreatePtrToInt(elem1, intType, "ptr_to_int1");
-                                                Value *intVal2 = builder.CreatePtrToInt(elem2, intType, "ptr_to_int2");
-                                                elemCmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-                                            } else {
-                                                errs() << "Unsupported struct element type for comparison.\n";
-                                                structCmp = nullptr;
-                                                break;
-                                            }
-                                            structCmp = builder.CreateAnd(structCmp, elemCmp, "struct_cmp_agg");
-                                        }
-                                        cmp = structCmp;
-                                        if (cmp == nullptr) {
-                                            errs() << "Struct comparison failed! " << *(Inst) << "\n";
-                                        }
-                                    } else {
-                                        errs() << "!!!!!! FIX IT: NO_COMPARISON SUPPORTED YET for instruction: " << *Inst << " is of type: ";
-                                        lastInst->getType()->print(errs());
-                                        errs() << "\n";
-                                    }
+                                Value *origForCmp = lastValue ? lastValue : lastInst;
+                                Value *cmp = emitEqualityCheck(builder, origForCmp, clonedLastInst,
+                                        F.getParent()->getDataLayout());
+                                if (!cmp) {
+                                    errs() << "No comparison supported for instruction: " << *Inst << " is of type: ";
+                                    origForCmp->getType()->print(errs());
+                                    errs() << "\n";
                                 }
 
                                 if (cmp) {
@@ -488,6 +440,12 @@ namespace {
                             }
                         }
                     }	
+                }
+
+                // Aliasing protection
+                if (!pendingLoadClones.empty() && lastLoadInst) {
+                    flushLoadClones(lastLoadInst);
+                    lastLoadInst = nullptr;
                 }
 
                 // Create the comparison by aggregating the results of all icmp instructions and create the corresponding then/else blocks
@@ -536,7 +494,7 @@ namespace {
                         Value *instName = elseBuilder.CreateGlobalStringPtr(origInstrStr.c_str());
                         auto clonedInstrItr = cloneMap.find(origInstr);
                         if (clonedInstrItr == cloneMap.end()) {
-                            errs() << "ERROR: No instruction in cloneMap!!!!!!!!!" << "\n";
+                            errs() << "Error: No instruction in cloneMap!" << "\n";
                         }
 
                         Type * instReturnType1 = nullptr;
@@ -554,19 +512,28 @@ namespace {
                         // Create the values for the memset call parameters
                         Value *Zero = elseBuilder.getInt8(0);
 
-                        // Allocate a big enough constant amount of space (64 bytes) for all instructions
-                        Value *SizeVal = elseBuilder.getInt32(64); // 64 bytes
-                        MaybeAlign Alignment(8); 
-                        Value *IsVolatile = elseBuilder.getInt1(true); // Volatile
+                        // Scratch buffers for the hex dump, sized to hold each value (min 64 bytes)
+                        const DataLayout &DL = F.getParent()->getDataLayout();
+                        uint64_t bufBytes1 = DL.getTypeStoreSize(instReturnType1);
+                        uint64_t bufBytes2 = DL.getTypeStoreSize(instReturnType2);
+                        if (bufBytes1 < 64) bufBytes1 = 64;
+                        if (bufBytes2 < 64) bufBytes2 = 64;
+                        Align bufAlign1 = DL.getABITypeAlign(instReturnType1);
+                        Align bufAlign2 = DL.getABITypeAlign(instReturnType2);
+                        if (bufAlign1 < Align(8)) bufAlign1 = Align(8);
+                        if (bufAlign2 < Align(8)) bufAlign2 = Align(8);
 
-                        // Create an array type of 64 elements, each of type i8 (1 byte)
-                        ArrayType* Int64ArrayType = ArrayType::get(Zero->getType(), 64);
+                        // Create byte arrays sized to hold each value (min 64 bytes)
+                        ArrayType* Int64ArrayType1 = ArrayType::get(Zero->getType(), bufBytes1);
+                        ArrayType* Int64ArrayType2 = ArrayType::get(Zero->getType(), bufBytes2);
 
-                        AllocaInst* allocaInstr1 = elseBuilder.CreateAlloca(Int64ArrayType, nullptr, "alloca1");
-                        AllocaInst* allocaInstr2 = elseBuilder.CreateAlloca(Int64ArrayType, nullptr, "alloca2");
+                        AllocaInst* allocaInstr1 = elseBuilder.CreateAlloca(Int64ArrayType1, nullptr, "alloca1");
+                        AllocaInst* allocaInstr2 = elseBuilder.CreateAlloca(Int64ArrayType2, nullptr, "alloca2");
+                        allocaInstr1->setAlignment(bufAlign1);
+                        allocaInstr2->setAlignment(bufAlign2);
 
-                        elseBuilder.CreateMemSet(allocaInstr1, Zero, SizeVal, Alignment, true);
-                        elseBuilder.CreateMemSet(allocaInstr2, Zero, SizeVal, Alignment, true);
+                        elseBuilder.CreateMemSet(allocaInstr1, Zero, elseBuilder.getInt32(bufBytes1), bufAlign1, true);
+                        elseBuilder.CreateMemSet(allocaInstr2, Zero, elseBuilder.getInt32(bufBytes2), bufAlign2, true);
 
                         // Create store instructions in the else block
                         PointerType *origin_ptr = nullptr;
@@ -643,7 +610,7 @@ namespace {
                     totalBasicBlocks += std::distance(F.begin(), F.end());
                 }
             }
-            errs() << "Total basic blocks in module: " << totalBasicBlocks << "\n";
+            // errs() << "Total basic blocks in module: " << totalBasicBlocks << "\n";
         }
 
     };
