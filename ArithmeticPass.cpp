@@ -11,24 +11,28 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <iterator> 
 #include <vector>
 #include <map>
+#include <set>
 
 using namespace llvm;
 static std::map<unsigned, Function*> NoOpFunctionRegistry;
+static const bool UseVolatile = true;  // for redundancy preservation
 
 namespace {
 	struct ArithmeticPass : public FunctionPass {
 		static char ID;
 		ArithmeticPass() : FunctionPass(ID) {}
 
+		enum class ArithPolicy { Instrument, Exclude, Unknown };
 
 		static unsigned blockCounter; // Basic block ID of the function
 		static unsigned totalBasicBlocks; //Total number of basic blocks across functions
 		static bool countedBlocks; // Ensure basic blocks are counted only once    
-		static unsigned totalFunctions;
+		static unsigned totalFunctions; //Total number of functions processed
 
 		std::string instructionToString(Instruction *I) {
 			std::string str;
@@ -36,64 +40,75 @@ namespace {
 			return str;
 		}
 
-		bool isExcludedInstruction(Instruction *inst) {	
-			if (isa<LoadInst>(inst) || isa<StoreInst>(inst) ||
-					isa<AtomicCmpXchgInst>(inst) || isa<AtomicRMWInst>(inst) || (isa<LandingPadInst>(inst)) || 
-					isa<InsertElementInst>(inst) || isa<AllocaInst>(inst) ||
-					isa<InsertValueInst>(inst)|| isa<FenceInst>(inst) || isa<PHINode>(inst)) {
-				return true;
+		ArithPolicy classifyCall(CallInst *callInst) {
+			if (callInst->getType()->isVoidTy() || callInst->isMustTailCall() ||
+					callInst->cannotDuplicate() || callInst->isConvergent()) {
+				return ArithPolicy::Exclude;
 			}
-
-			if (isa<LoadInst>(inst)) {
-				// Don't duplicate atomic loads
-				if (dyn_cast<LoadInst>(inst)->isAtomic()) {
-					return true;
-				}
-				if (dyn_cast<LoadInst>(inst)->isVolatile()) {
-					return true;
-				}
+			if (callInst->mayHaveSideEffects()) {
+				return ArithPolicy::Exclude;
 			}
+			if (callInst->isInlineAsm()) {
+				InlineAsm *inlineAsm = dyn_cast<InlineAsm>(callInst->getCalledOperand());
+				if (inlineAsm && inlineAsm->getAsmString().find("syscall") != std::string::npos) {
+					return ArithPolicy::Exclude;
+				}
+				return callInst->doesNotAccessMemory() ?
+						ArithPolicy::Instrument : ArithPolicy::Exclude;  
+			}
+			Function *calledFunction = callInst->getCalledFunction();
+			if (calledFunction && calledFunction->isIntrinsic() &&
+					callInst->doesNotAccessMemory()) {
+				return ArithPolicy::Instrument;
+			}
+			return ArithPolicy::Exclude;
+		}
 
+		ArithPolicy classifyInstruction(Instruction *inst) {
+			// Calls have separate attribute and inline-assembly checks.
 			if (auto *callInst = dyn_cast<CallInst>(inst)) {
-				// Convert tail calls to non-tail calls. It is not safe to insert instructions after tail calls. 
-				if (callInst->isTailCall()) {
+				return classifyCall(callInst);
+			}
+
+			if (auto *fpOp = dyn_cast<FPMathOperator>(inst)) {
+				if (fpOp->getFastMathFlags().any()) {
+					return ArithPolicy::Exclude;
+				}
+			}
+
+			// Explicit exclusions fail side-effect freedom (C1), determinism (C2),
+			// or have no independently comparable result.
+			if (inst->isTerminator() || isa<LoadInst>(inst) || isa<StoreInst>(inst) ||
+					isa<AtomicCmpXchgInst>(inst) || isa<AtomicRMWInst>(inst) ||
+					isa<AllocaInst>(inst) || isa<FenceInst>(inst) || isa<PHINode>(inst) ||
+					isa<LandingPadInst>(inst) || isa<FuncletPadInst>(inst) ||
+					isa<InsertElementInst>(inst) || isa<InsertValueInst>(inst) ||
+					isa<FreezeInst>(inst) || isa<VAArgInst>(inst) || isa<CallBase>(inst)) {
+				return ArithPolicy::Exclude;
+			}
+
+			// Explicit allowlist for supported arithmetic/computational instructions.
+			if (isa<BinaryOperator>(inst) || isa<UnaryOperator>(inst) ||
+					isa<CastInst>(inst) || isa<CmpInst>(inst) ||
+					isa<SelectInst>(inst) || isa<GetElementPtrInst>(inst) ||
+					isa<ExtractElementInst>(inst) || isa<ShuffleVectorInst>(inst) ||
+					isa<ExtractValueInst>(inst)) {
+				return ArithPolicy::Instrument;
+			}
+
+			errs() << "ITHICA ArithmeticPass: unclassified opcode '"
+				   << inst->getOpcodeName()
+				   << "' is not instrumented; add it to the Instrument or Exclude "
+					  "set in classifyInstruction()\n";
+			return ArithPolicy::Unknown;
+		}
+
+		void prepareForInstrumentation(Instruction *inst) {
+			if (auto *callInst = dyn_cast<CallInst>(inst)) {
+				if (callInst->isTailCall() && !callInst->isMustTailCall()) {
 					callInst->setTailCall(false);
 				}
-
-				// Don't duplicate void calls (they do not return a value to compare)
-				if (callInst->getType()->isVoidTy()) {
-					return true;
-				}
-
-				//Exclude calls with sideffects
-				if (callInst->mayHaveSideEffects()) {
-					return true;
-				}
-
-				if (callInst->isInlineAsm()) {
-					InlineAsm *inlineAsm = dyn_cast<InlineAsm>(callInst->getCalledOperand());
-					// Exclude inline assembly system calls
-					if (inlineAsm && inlineAsm->getAsmString().find("syscall") != std::string::npos) {
-						return true; 
-					}
-					// Include all other inline assembly calls
-					return false;
-				}
-				
-				if (auto *callInst = dyn_cast<CallInst>(inst)) {
-					if (Function *calledFunction = callInst->getCalledFunction()) {
-						if (calledFunction->getName().contains("llvm.") && !callInst->getType()->isVoidTy()) {
-							// Check if the called function has the `readonly` or `readnone` attribute. If yes, include it
-							if (calledFunction->hasFnAttribute(Attribute::ReadOnly) || calledFunction->hasFnAttribute(Attribute::ReadNone)) {
-								return false;
-							}
-						}
-					}
-				}
-				return true;
 			}
-			// Duplicate everything else
-			return false;
 		}
 
 		bool containsResumeOrCleanupInstruction(BasicBlock &BB) {
@@ -121,8 +136,11 @@ namespace {
 			if (isa<GetElementPtrInst>(operand)) {
 				return operand;
 			}
+			if (!UseVolatile) {
+				return operand;
+			}
 
-			// By putting all the allocas at the beginning of the first basic block of the function (=static allocas), 
+			// By putting all the allocas at the beginning of the first basic block of the function (=static allocas),
 			//they get run in the prolog/epilog of the function and therefore they are basically free. 
 			BasicBlock &entryBlock = func.getEntryBlock();
 			allocaBuilder.SetInsertPoint(&entryBlock, entryBlock.getFirstInsertionPt()); // Set the insertion point of the alloca to the beginning of the entry block
@@ -144,9 +162,84 @@ namespace {
 			return loadInst;
 		}
 
+		void remapCloneDependencies(
+				Instruction *clonedInst,
+				const std::map<Instruction*, Instruction*> &cloneMap) {
+			for (unsigned i = 0; i < clonedInst->getNumOperands(); ++i) {
+				auto *operandInst = dyn_cast<Instruction>(clonedInst->getOperand(i));
+				auto clonedOperand = cloneMap.find(operandInst);
+				if (clonedOperand != cloneMap.end()) {
+					clonedInst->setOperand(i, clonedOperand->second);
+				}
+			}
+		}
+
+		bool isClonedValue(Value *V,
+				const std::map<Instruction*, Instruction*> &cloneMap) {
+			auto *inst = dyn_cast<Instruction>(V);
+			if (!inst) {
+				return false;
+			}
+			// cloneMap holds original -> clone. A value is a "clone result" iff it
+			// is the mapped-to instruction of some entry. 
+			for (const auto &entry : cloneMap) {
+				if (entry.second == inst) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		void prepareCloneOperands(
+				Instruction *originalInst, Instruction *clonedInst,
+				Function &F, IRBuilder<> &builder, IRBuilder<> &allocaBuilder,
+				const std::map<Instruction*, Instruction*> &cloneMap) {
+			std::vector<Value*> clonedOperands;
+			bool anyBarriered = false;      // did a real barrier get inserted
+			bool anySkippedByDesign = false; // constant / already-a-clone
+
+			for (Use &U : clonedInst->operands()) {
+				Value *operand = U.get();
+				if (isa<Constant>(operand)) {
+					anySkippedByDesign = true;
+					clonedOperands.push_back(operand);
+				} else if (isClonedValue(operand, cloneMap)) {
+					// Leaf-only (default). For full redundancy, replace the two lines below
+					// with the two commented lines (barriers intermediate clone results too,
+					// so the optimizer can't collapse invertible chains).
+					anySkippedByDesign = true;
+					clonedOperands.push_back(operand);
+					// anyBarriered = true;
+					// clonedOperands.push_back(handleOperand(operand, F, builder, allocaBuilder));
+				} else {
+					anyBarriered = true;
+					clonedOperands.push_back(
+							handleOperand(operand, F, builder, allocaBuilder));
+				}
+			}
+
+			if (!anyBarriered && !anySkippedByDesign) {
+				if (isa<LoadInst>(originalInst)) {
+					if (auto *clonedLoad = dyn_cast<LoadInst>(clonedInst)) {
+						clonedLoad->setVolatile(true);
+					} else {
+						errs() << "Suspicious: expected a load clone but found none: "
+							   << *originalInst << "\n";
+					}
+				} else {
+					errs() << "Warning: no barrier inserted where one was expected: "
+						   << *originalInst << "\n";
+				}
+			}
+
+			for (size_t i = 0; i < clonedOperands.size(); ++i) {
+				clonedInst->setOperand(i, clonedOperands[i]);
+			}
+		}
+
 		bool isExcludedFunction(Function *F) {
 			static const std::set<std::string> ExcludedFunctions = {
-				"Function_name_to_exclude"
+				"Function_name_to_exclude_"
 			};
 			for (const auto &excludedName : ExcludedFunctions) {
 				if (F->getName().str().find(excludedName) != std::string::npos) {
@@ -156,6 +249,68 @@ namespace {
 			return false;
 		}
 
+
+		// i1 iff a==b; FP bitwise; aggregates element-wise. nullptr = unsupported.
+		Value *emitEqualityCheck(IRBuilder<> &B, Value *a, Value *b, const DataLayout &DL) {
+			Type *T = a->getType();
+			LLVMContext &C = B.getContext();
+
+			if (T->isIntegerTy()) {
+				return B.CreateICmpEQ(a, b, "cmp_result" + std::to_string(blockCounter));
+			}
+			if (T->isFloatingPointTy()) {
+				// Compare the raw bits so that bit-identical NaNs count as equal.
+				unsigned bits = T->getScalarSizeInBits();
+				Type *intTy = IntegerType::get(C, bits);
+				Value *ia = B.CreateBitCast(a, intTy, "fp_bits1");
+				Value *ib = B.CreateBitCast(b, intTy, "fp_bits2");
+				return B.CreateICmpEQ(ia, ib, "cmp_result" + std::to_string(blockCounter));
+			}
+			if (T->isPointerTy()) {
+				Type *intTy = B.getIntPtrTy(DL);
+				Value *ia = B.CreatePtrToInt(a, intTy, "ptr_to_int1");
+				Value *ib = B.CreatePtrToInt(b, intTy, "ptr_to_int2");
+				return B.CreateICmpEQ(ia, ib, "ptr_cmp_result");
+			}
+			if (auto *vecTy = dyn_cast<VectorType>(T)) {
+				unsigned numElements = vecTy->getElementCount().getKnownMinValue();
+				Value *agg = ConstantInt::getTrue(C);
+				for (unsigned i = 0; i < numElements; ++i) {
+					Value *idx = ConstantInt::get(Type::getInt32Ty(C), i);
+					Value *e1 = B.CreateExtractElement(a, idx, "vec_elem1");
+					Value *e2 = B.CreateExtractElement(b, idx, "vec_elem2");
+					Value *ec = emitEqualityCheck(B, e1, e2, DL);
+					if (!ec) return nullptr;
+					agg = B.CreateAnd(agg, ec, "vec_cmp_agg");
+				}
+				return agg;
+			}
+			if (auto *structTy = dyn_cast<StructType>(T)) {
+				unsigned numElements = structTy->getNumElements();
+				Value *agg = ConstantInt::getTrue(C);
+				for (unsigned i = 0; i < numElements; ++i) {
+					Value *e1 = B.CreateExtractValue(a, i, "struct_elem1");
+					Value *e2 = B.CreateExtractValue(b, i, "struct_elem2");
+					Value *ec = emitEqualityCheck(B, e1, e2, DL);
+					if (!ec) return nullptr;
+					agg = B.CreateAnd(agg, ec, "struct_cmp_agg");
+				}
+				return agg;
+			}
+			if (auto *arrTy = dyn_cast<ArrayType>(T)) {
+				unsigned numElements = (unsigned)arrTy->getNumElements();
+				Value *agg = ConstantInt::getTrue(C);
+				for (unsigned i = 0; i < numElements; ++i) {
+					Value *e1 = B.CreateExtractValue(a, i, "arr_elem1");
+					Value *e2 = B.CreateExtractValue(b, i, "arr_elem2");
+					Value *ec = emitEqualityCheck(B, e1, e2, DL);
+					if (!ec) return nullptr;
+					agg = B.CreateAnd(agg, ec, "arr_cmp_agg");
+				}
+				return agg;
+			}
+			return nullptr;
+		}
 
 		bool runOnFunction(Function &F) override {
 			int blockSize = 
@@ -178,13 +333,12 @@ namespace {
 			#else
 				"top-level code"; 
 			#endif
-
 			
 			totalFunctions ++;
 
 			if (isExcludedFunction(&F)) {
 				errs() << "Skipping function: " << F.getName() << "\n";
-				return true;
+				return false;
 			}
 
 			LLVMContext &Ctx = F.getContext();
@@ -230,7 +384,9 @@ namespace {
 				// The dependency graph is needed for BLOCKSIZE=0 (d), which inserts the check at the end of the instruction dependency chain
 				std::map<Instruction*, std::vector<Instruction*>> dependencyGraph;
 				for (Instruction &I : *BB) {
-					if (&I != BB->getTerminator() && !isExcludedInstruction(&I)) {
+					ArithPolicy policy = classifyInstruction(&I);
+					if (policy == ArithPolicy::Instrument) {
+						prepareForInstrumentation(&I);
 						originalInstructions.push_back(&I);
 						// Construct the dependency graph
 						std::vector<Instruction*> dependencies;
@@ -246,7 +402,6 @@ namespace {
 				std::vector<Instruction*> independentClusters; 
 				for (auto &entry : dependencyGraph) {
 					Instruction *inst = entry.first;
-					std::vector<Instruction*> &deps = entry.second;
 
 					bool isEndOfCluster = true;
 					for (auto &pair : dependencyGraph) {
@@ -263,9 +418,6 @@ namespace {
 				std::map<Instruction*, Instruction*> cloneMap;
 				std::vector<std::pair<Value*, Instruction*>> icmpResults;  // Pair of cmp result and instruction string
 
-				Instruction *lastInst = nullptr;  // Declare lastInst outside the loop
-				Instruction *clonedLastInst = nullptr;  // Declare clonedLastInst outside the loop
-
 				// Create an IRBuilder for allocas at the beginning of the basic block.
 				// This is passed as argument to the handleOperands function
 				IRBuilder<> allocaBuilder(BB);
@@ -280,8 +432,6 @@ namespace {
 				// Loop through each instruction of the basic block
 				for (Instruction *Inst : originalInstructions) {
 					instCounter++;
-					std::vector<Value*> clonedOperands;
-					std::vector<Value*> dependencyOperands;
 
 					Instruction *clonedInst = Inst->clone();
 					// Make sure the alignment is correct for Loads. Probably not needed
@@ -292,95 +442,26 @@ namespace {
 						clonedInst = clonedLoadInst;
 					} 
 
-					for (unsigned i = 0; i < Inst->getNumOperands(); ++i) {
-						Value *operand = Inst->getOperand(i);
-						if (cloneMap.find(dyn_cast<Instruction>(operand)) != cloneMap.end()) {
-							// If there's a duplicate instruction for the operand, use that. This ensures the
-							//dependencies are preserved for the duplicate instructions as well.
-							dependencyOperands.push_back(cloneMap[dyn_cast<Instruction>(operand)]);
-						} else {
-							dependencyOperands.push_back(operand);
-						}
-					}
-					for (size_t j = 0; j < dependencyOperands.size(); ++j) {
-							clonedInst->setOperand(j, dependencyOperands[j]);
-					}
+					remapCloneDependencies(clonedInst, cloneMap);
 					
 					lastOrigInst = Inst;
 
 					// Handle the different interleavings. Add the cloned instructions to their respective chunks
 					chunkedClonedInsts.push_back(clonedInst);	
 					if (interleaving == 0) {
-						//Volatile trick for int0
-						bool atleastonehandled = false;
-						for (unsigned i = 0; i < clonedInst->getNumOperands(); ++i) {
-							Value *operand = clonedInst->getOperand(i);
-							if (isa<Constant>(operand)) {
-								// If operand is a constant, don't do volatile handling
-								clonedOperands.push_back(operand);
-							} else {
-								atleastonehandled = true;
-								Value *volatileOperand;
-								volatileOperand = handleOperand(operand, F, volbuilderInt0, allocaBuilder);
-								clonedOperands.push_back(volatileOperand); 
-							}
-						}
-						if (atleastonehandled == false) {
-							if (isa<LoadInst>(Inst)) {
-								if (LoadInst *clonedLoad = dyn_cast<LoadInst>(clonedInst)) {
-									clonedLoad->setVolatile(true);
-								} else {
-									errs() << "Suspicious, I shouldn't be here." << *Inst << "\n";
-								}
-							} else {
-									errs() << "Corner case for volatile trick: " << *Inst << " with argument: " << *(Inst->getOperand(0))  << "\n";
-							}
-						}	
-						// Replace operands in the cloned instruction with their volatile versions or existing clones
-						for (size_t j = 0; j < clonedOperands.size(); ++j) {
-							clonedInst->setOperand(j, clonedOperands[j]);
-						}
-						clonedOperands.clear();
+						prepareCloneOperands(
+								Inst, clonedInst, F, volbuilderInt0, allocaBuilder, cloneMap);
 						clonedInst->insertBefore(BB->getTerminator());
 
 					} else if (chunkedClonedInsts.size() == interleaving || (instCounter == originalInstructions.size())) {
 						// Insert all clones after the current original instruction (Inst)
 						for (Instruction *ci : chunkedClonedInsts) {
-							ci->insertAfter(lastOrigInst);  
-							IRBuilder <> volbuilderIntX(ci);	
-							
-							//Volatile trick
-							bool atleastonehandled = false;
-							for (unsigned i = 0; i < ci->getNumOperands(); ++i) {
-								Value *operand = ci->getOperand(i);
-								if (isa<Constant>(operand)) {
-									// If operand is a constant, don't do volatile handling
-									clonedOperands.push_back(operand);
-								} else {
-									atleastonehandled = true;
-									Value *volatileOperand;
-									volatileOperand = handleOperand(operand, F, volbuilderIntX, allocaBuilder);
-									clonedOperands.push_back(volatileOperand); 
-								}
-							}
-							if (atleastonehandled == false) {
-								if (isa<LoadInst>(Inst)) {
-									if (LoadInst *clonedLoad = dyn_cast<LoadInst>(ci)) {
-										clonedLoad->setVolatile(true);
-									} else {
-										errs() << "Suspicious, I shouldn't be here. " << *Inst << "\n";
-									}
-								} else {
-										errs() << "Corner case for volatile trick: " << *Inst << " with argument: " << *(Inst->getOperand(0))  << "\n";
-								}
-							}
-							// Replace operands in the cloned instruction with their volatile versions or existing clones
-							for (size_t j = 0; j < clonedOperands.size(); ++j) {
-								ci->setOperand(j, clonedOperands[j]);
-							}
-							clonedOperands.clear();
+							ci->insertAfter(lastOrigInst);
+							IRBuilder <> volbuilderIntX(ci);
+							prepareCloneOperands(
+									Inst, ci, F, volbuilderIntX, allocaBuilder, cloneMap);
 
-							lastOrigInst = ci;  // Update Inst to the cloned instruction, so the next clone is inserted after it
+							lastOrigInst = ci;
 						}
 						// Clear the cloned instructions vector
 						chunkedClonedInsts.clear();
@@ -388,13 +469,11 @@ namespace {
 					
 					cloneMap[Inst] = clonedInst;
 				
-					if (!Inst->getType()->isVoidTy()) {
-						lastInst = Inst;
-						clonedLastInst = clonedInst;
-					} else if (isa<CallInst>(Inst) && Inst->getType()->isVoidTy()) {
-						continue;
-					} else {
-						errs() << "ERROR: My instruction is nullptr." << "\n";
+					if (Inst->getType()->isVoidTy()) {
+						if (isa<CallInst>(Inst)) {
+							continue;
+						}
+						errs() << "Error: Instruction is nullptr." << "\n";
 					}
 
 					Instruction *lastInst = originalInstructions[instCounter - 1];
@@ -404,92 +483,10 @@ namespace {
 						Instruction *clonedLastInst = cloneMap[lastInst];
 
 						IRBuilder<> builder(BB->getTerminator());
-						Value *cmp = nullptr;
-
-						if (lastInst->getType()->isIntegerTy() && clonedLastInst->getType()->isIntegerTy()) {
-							cmp = builder.CreateICmpEQ(lastInst, clonedLastInst, "cmp_result" + std::to_string(blockCounter));
-						} else if (lastInst->getType()->isFloatingPointTy() && clonedLastInst->getType()->isFloatingPointTy()) {
-							cmp = builder.CreateFCmpOEQ(lastInst, clonedLastInst, "cmp_result" + std::to_string(blockCounter));
-						} else if (isa<VectorType>(lastInst->getType())) {
-							auto *vecType = cast<VectorType>(lastInst->getType());
-							Value *vectorCmp = ConstantInt::getTrue(builder.getContext());
-							unsigned numElements = vecType->getElementCount().getKnownMinValue(); 
-							for (unsigned i = 0; i < numElements; ++i) {
-								Value *elem1 = builder.CreateExtractElement(lastInst, ConstantInt::get(Type::getInt32Ty(builder.getContext()), i), "vec_elem1");
-								Value *elem2 = builder.CreateExtractElement(clonedLastInst, ConstantInt::get(Type::getInt32Ty(builder.getContext()), i), "vec_elem2");
-								Value *elemCmp = nullptr;
-								if (vecType->getElementType()->isIntegerTy()) {
-									elemCmp = builder.CreateICmpEQ(elem1, elem2);
-								} else if (vecType->getElementType()->isFloatingPointTy()) {
-									elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-								} else if (vecType->getElementType()->isPointerTy()) {
-									auto *intType = builder.getIntPtrTy(lastInst->getModule()->getDataLayout());
-									Value *intVal1 = builder.CreatePtrToInt(elem1, intType, "ptr_to_int1");
-									Value *intVal2 = builder.CreatePtrToInt(elem2, intType, "ptr_to_int2");
-									elemCmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-								} else {
-									errs() << "Unsupported vector element type for comparison for: " << *lastInst<< " with type: ";
-									lastInst->getType()->print(errs());
-									errs() << "\n";
-									vectorCmp = nullptr;
-									break;
-								}
-								vectorCmp = builder.CreateAnd(vectorCmp, elemCmp, "vec_cmp_agg");
-							}
-							cmp = vectorCmp;
-							if (cmp == nullptr) {
-								errs() << "Vector comparison failed!" << *(Inst) << "\n";
-							}
-						} else if (lastInst->getType()->isPointerTy() || clonedLastInst->getType()->isPointerTy()) {
-							auto *intType = builder.getIntPtrTy(lastInst->getModule()->getDataLayout());
-							Value *intVal1 = builder.CreatePtrToInt(lastInst, intType, "ptr_to_int1");
-							Value *intVal2 = builder.CreatePtrToInt(clonedLastInst, intType, "ptr_to_int2");
-							cmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-						} else if (isa<StructType>(lastInst->getType())) {
-							auto *structType = cast<StructType>(lastInst->getType());
-							Value *structCmp = ConstantInt::getTrue(builder.getContext());
-							unsigned numElements = structType->getNumElements();
-							for (unsigned i = 0; i < numElements; ++i) {
-								Value *elem1 = builder.CreateExtractValue(lastInst, i, "struct_elem1");
-								Value *elem2 = builder.CreateExtractValue(clonedLastInst, i, "struct_elem2");
-								Value *elemCmp = nullptr;
-								if (structType->getElementType(i)->isIntegerTy()) {
-									elemCmp = builder.CreateICmpEQ(elem1, elem2);
-								} else if (structType->getElementType(i)->isFloatingPointTy()) {
-									elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-								} else if (structType->getElementType(i)->isPointerTy()) {
-								}  else if (isa<StructType>(lastInst->getType())) {
-									auto *structType = cast<StructType>(lastInst->getType());
-									Value *structCmp = ConstantInt::getTrue(builder.getContext());
-									unsigned numElements = structType->getNumElements();
-									for (unsigned i = 0; i < numElements; ++i) {
-										Value *elem1 = builder.CreateExtractValue(lastInst, i, "struct_elem1");
-										Value *elem2 = builder.CreateExtractValue(clonedLastInst, i, "struct_elem2");
-										Value *elemCmp = nullptr;
-										if (structType->getElementType(i)->isIntegerTy()) {
-											elemCmp = builder.CreateICmpEQ(elem1, elem2);
-										} else if (structType->getElementType(i)->isFloatingPointTy()) {
-											elemCmp = builder.CreateFCmpOEQ(elem1, elem2);
-										} else if (structType->getElementType(i)->isPointerTy()) {
-											auto *intType = builder.getIntPtrTy(lastInst->getModule()->getDataLayout());
-											Value *intVal1 = builder.CreatePtrToInt(elem1, intType, "ptr_to_int1");
-											Value *intVal2 = builder.CreatePtrToInt(elem2, intType, "ptr_to_int2");
-											elemCmp = builder.CreateICmpEQ(intVal1, intVal2, "ptr_cmp_result");
-										} else {
-											errs() << "Unsupported struct element type for comparison.\n";
-											structCmp = nullptr;
-											break;
-										}
-										structCmp = builder.CreateAnd(structCmp, elemCmp, "struct_cmp_agg");
-									}
-									cmp = structCmp;
-									if (cmp == nullptr) {
-										errs() << "Struct comparison failed!" << *(Inst) << "\n";
-									}
-								}
-							}
-						}  else {
-							errs() << "!!!!!! FIX IT: NO_COMPARISON SUPPORTED YET for instruction: " << *Inst << " is of type: ";
+						Value *cmp = emitEqualityCheck(builder, lastInst, clonedLastInst,
+								F.getParent()->getDataLayout());
+						if (!cmp) {
+							errs() << "No comparison supported for instruction: " << *Inst << " is of type: ";
 							lastInst->getType()->print(errs());
 							errs() << "\n";
 						}
@@ -539,13 +536,11 @@ namespace {
 						Value *instName = elseBuilder.CreateGlobalStringPtr(origInstrStr.c_str());
 						auto clonedInstrItr = cloneMap.find(origInstr);
 						if (clonedInstrItr == cloneMap.end()) {
-							errs() << "ERROR: No instruction in cloneMap!" << "\n";
+							errs() << "Error: No instruction in cloneMap!" << "\n";
 						}
 
-						if (Instruction *originalInst = dyn_cast<Instruction>(icmpPair.first)) {
+						if (isa<Instruction>(icmpPair.first)) {
 							Instruction * clonedInstr = cloneMap[origInstr];
-							Type * instReturnType1 = origInstr->getType();
-							Type * instReturnType2 = clonedInstr->getType();
 
 							Value * formatStr = elseBuilder.CreateGlobalStringPtr("Potential Failing Instruction: %s \n");
 							Value * newLine = elseBuilder.CreateGlobalStringPtr("\n");
@@ -557,18 +552,28 @@ namespace {
 							//it could be the case that this changes at runtime after the optimizations are performed. 
 							//For this reason, we allocate a big enough constant amount of space (64 bytes) for all instructions
 							//Probably uneccessary and can be removed.
-							Value *SizeVal = elseBuilder.getInt32(64); // 64 bytes
-							MaybeAlign Alignment(8); // Assume alignment of 1, adjust as needed
-							Value *IsVolatile = elseBuilder.getInt1(true); // Volatile
+							// Scratch buffers for the hex dump, sized to hold each value (min 64 bytes)
+							const DataLayout &DL = F.getParent()->getDataLayout();
+							uint64_t bufBytes1 = DL.getTypeStoreSize(origInstr->getType());
+							uint64_t bufBytes2 = DL.getTypeStoreSize(clonedInstr->getType());
+							if (bufBytes1 < 64) bufBytes1 = 64;
+							if (bufBytes2 < 64) bufBytes2 = 64;
+							Align bufAlign1 = DL.getABITypeAlign(origInstr->getType());
+							Align bufAlign2 = DL.getABITypeAlign(clonedInstr->getType());
+							if (bufAlign1 < Align(8)) bufAlign1 = Align(8);
+							if (bufAlign2 < Align(8)) bufAlign2 = Align(8);
 
-							// Create an array type of 64 elements, each of type i8 (1 byte)
-							ArrayType* Int64ArrayType = ArrayType::get(Zero->getType(), 64);
+							// Create byte arrays sized to hold each value (min 64 bytes)
+							ArrayType* Int64ArrayType1 = ArrayType::get(Zero->getType(), bufBytes1);
+							ArrayType* Int64ArrayType2 = ArrayType::get(Zero->getType(), bufBytes2);
 
-							AllocaInst* allocaInstr1 = elseBuilder.CreateAlloca(Int64ArrayType, nullptr, "alloca1");
-							AllocaInst* allocaInstr2 = elseBuilder.CreateAlloca(Int64ArrayType, nullptr, "alloca2");
+							AllocaInst* allocaInstr1 = elseBuilder.CreateAlloca(Int64ArrayType1, nullptr, "alloca1");
+							AllocaInst* allocaInstr2 = elseBuilder.CreateAlloca(Int64ArrayType2, nullptr, "alloca2");
+							allocaInstr1->setAlignment(bufAlign1);
+							allocaInstr2->setAlignment(bufAlign2);
 
-							elseBuilder.CreateMemSet(allocaInstr1, Zero, SizeVal, Alignment, true);
-							elseBuilder.CreateMemSet(allocaInstr2, Zero, SizeVal, Alignment, true);
+							elseBuilder.CreateMemSet(allocaInstr1, Zero, elseBuilder.getInt32(bufBytes1), bufAlign1, true);
+							elseBuilder.CreateMemSet(allocaInstr2, Zero, elseBuilder.getInt32(bufBytes2), bufAlign2, true);
 
 							// Create store instructions in the else block
 							PointerType *origin_ptr = PointerType::getUnqual(origInstr->getType());
@@ -597,16 +602,13 @@ namespace {
 							Value * size_bytes1 = ConstantInt::get(Type::getInt32Ty(Ctx), size1, false);
 							Value * size_bytes2 = ConstantInt::get(Type::getInt32Ty(Ctx), size2, false);
 
-							Value * bb_index = ConstantInt::get(Type::getInt32Ty(Ctx), blockCounter, false);
-							Value * bb_total = ConstantInt::get(Type::getInt32Ty(Ctx), totalBasicBlocks, false);
-
 							elseBuilder.CreateCall(fprintFunc, {formatStr, instName});
 							elseBuilder.CreateCall(pp, {castedAddr1, size_bytes1, castedAddr2, size_bytes2});
 							elseBuilder.CreateCall(fprintFunc, {newLine});
 						}
 					}
 
-					// Uncomment for more info printed but slower build process
+					// Uncomment the following code for more info printed upon error detectionbut slower build process
 					/*
 					std::string separator1 = "Beginning Of Failing Block:\n";
 					Value *separatorStrVal1 = elseBuilder.CreateGlobalStringPtr(separator1.c_str());
@@ -646,7 +648,6 @@ bool ArithmeticPass::countedBlocks = false;
 unsigned ArithmeticPass::totalFunctions = 0;
 
 char ArithmeticPass::ID = 0;
-
 
 static RegisterPass<ArithmeticPass> X("arithmeticpass", "ITHICA_A: Duplicate arithmetic instructions and compare", false, false);
 
