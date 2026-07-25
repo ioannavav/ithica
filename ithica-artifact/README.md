@@ -16,7 +16,7 @@ This artifact includes the ITHICA LLVM IR passes (Arith, Mem, MemDiv, Br, and th
 - **How much disk space required (approximately)?:** 40 GB
 - **How much time is needed to prepare workflow (approximately)?:** 10 minutes for Docker environment setup. To recompile all binaries from source: additional 8 hours.
 - **How much time is needed to complete experiments (approximately)?:** 70 minutes total to execute all binaries.
-- **Publicly available?:** yes (de-anonymized github link will be provided after shepherding): https://anonymous.4open.science/r/ithica-sdc
+- **Publicly available?:** yes: https://github.com/ioannavav/ithica
 - **Code licenses (if publicly available)?:** MIT
 - **Workflow automation framework used?:** Docker.
 - **Archived (provide DOI)?:** https://zenodo.org/records/21554153
