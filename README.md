@@ -1,4 +1,10 @@
-# Use of ITHICA passes 
+This artifact includes the ITHICA LLVM IR passes (Arithm, Mem, MemDiv, Br and their combinations) used to transform real programs into tests for hardware defects.
+ITHICA transformations are used to compile cpu-check (https://github.com/google/cpu-check) in cpu-check-ae/ and FleetBench (https://github.com/google/fleetbench) in fleetbench-ae/.
+See corresponding folders and README.md files for instructions.
+
+Below, we explain how to use ITHICA passes to compile a simple example program:
+
+# Use of ITHICA passes for simple program example
 
 We explain how to use the ITHICA compiler passes and provide examples of how different ITHICA passes transform an example input program. 
 For each ITHICA transformation, we present the original LLVM IR code and the transformed code after applying a pass. 
