@@ -1,3 +1,5 @@
+# ITHICA Artifact Appendix
+
 ## Abstract
 
 This artifact includes the ITHICA LLVM IR passes (Arith, Mem, MemDiv, Br, and their combinations) used to transform real programs into tests for hardware defects (first contribution in §1). It demonstrates that ITHICA passes successfully instrument the two programs used in the paper: cpu-check and FleetBench. For ease of use, the artifact provides a pinned Docker build environment per program (kept separate due to disjoint build requirements), containing all dependencies needed to compile both programs (with and without ITHICA) from source. The artifact reproduces the runtime overhead and binary-size increase that ITHICA transformations impose relative to the uninstrumented cpu-check baseline, as reported in Table 6 of the paper. Pre-built binaries for all configurations of Table 6 are provided to reproduce the measurements directly, even without recompilation. The remaining results (§7–§8) require access to proprietary defective hardware owned by the hyperscaler, and therefore cannot be reproduced.
@@ -16,22 +18,22 @@ This artifact includes the ITHICA LLVM IR passes (Arith, Mem, MemDiv, Br, and th
 - **How much disk space required (approximately)?:** 40 GB
 - **How much time is needed to prepare workflow (approximately)?:** 10 minutes for Docker environment setup. To recompile all binaries from source: additional 8 hours.
 - **How much time is needed to complete experiments (approximately)?:** 70 minutes total to execute all binaries.
-- **Publicly available?:** yes: https://github.com/ioannavav/ithica
-- **Code licenses (if publicly available)?:** MIT
+- **Publicly available?:** Yes. [ITHICA-artifact](https://github.com/ioannavav/ithica/tree/main)
+- **Code licenses (if publicly available)?:** MIT License.
 - **Workflow automation framework used?:** Docker.
-- **Archived (provide DOI)?:** https://zenodo.org/records/21554153
+- **Archived (provide DOI)?:** [Zenodo DOI](https://zenodo.org/records/21554153)
 
 ## Description
 
 ### How to access
 
-The artifact is archived on Zenodo (DOI above).
+The artifact is archived on [Zenodo](https://zenodo.org/records/21554153) (also public in the [ITHICA-artifact](https://github.com/ioannavav/ithica/tree/main) repository).
 
 The artifact contains two directories, `cpu-check-ae/` and `fleetbench-ae/`, one per program. Each holds the ITHICA pass sources, the pinned program source, the pinned toolchain, pre-built binaries (to avoid heavy recompilation of some programs if needed), and three driver scripts: `setup.sh` provisions the toolchain, `build.sh` compiles the program with a chosen ITHICA pass, and `measure.sh` runs the (resulting or pre-built) binaries and reports the metrics.
 
 ### Hardware dependencies
 
-x86-64 Linux machine with 40 GB of free disk space. 8 GB RAM suffices to run the pre-built binaries (`measure.sh`); 16 GB RAM are needed to optionally re-build binaries from source (`build.sh`). To reproduce the reported results closely, a host with at least 32 physical / 64 logical CPUs is recommended.
+x86-64 Linux machine with 40 GB of free disk space and 16 GB RAM. To reproduce the reported results closely, a host with at least 32 physical / 64 logical CPUs is recommended.
 
 Reference host: Intel Xeon Gold 6226R — 2 sockets × 16 cores *per socket* = 32 physical cores, and 2 threads per core = 64 logical CPUs; 500 GB RAM. The results obtained are expected to vary depending on the underlying hardware (§Notes).
 
@@ -61,13 +63,13 @@ scripts/setup.sh   # docker build (Dockerfile)
 
 ## Experiment workflow
 
-The evaluation first builds the ITHICA passes (`build_pass.sh`) and uses them to compile the two programs (`build.sh`). Two script-driven experiments then measure the resulting binaries: for cpu-check, E1 measures the per-pass overhead and binary-size increase compared to the uninstrumented baseline (the main result, reproducing Table 6), and E2 measures the same two metrics for FleetBench with and without the Arith pass. The §Evaluation section gives commands and expected results.
+The evaluation first compiles the two programs with ITHICA; `build.sh` builds the target pass and compiles the program in one step, while `build_pass.sh` builds a pass separately, for inspection. Two script-driven experiments then measure the resulting binaries: for cpu-check, E1 measures the per-pass overhead and binary-size increase compared to the uninstrumented baseline (main result, reproducing Table 6), and E2 measures the same two metrics for FleetBench with and without Arith.
 
-ITHICA is not limited to these two programs: a small toy program (`toy_overhead/toy_program.cpp`) ships in the cpu-check image so users can quickly instrument and run it (`scripts/toy_overhead.sh`) or compile their own programs.
+A toy program (`toy_overhead/toy_program.cpp`) ships in the cpu-check image so users can quickly instrument and run it (`cpu-check-ae/scripts/toy_overhead.sh`).
 
 ## Evaluation and expected results
 
-**Table: Results equivalent to Table 6 in the paper**, here measured on a non-industrial (non-proprietary) server. Performance overhead and binary-size increase for ITHICA transformations — and different block-size configurations — compared to cpu-check (uninstrumented baseline).
+**Table: Results equivalent to Table 6**, here measured on a non-industrial (non-proprietary) server. Performance overhead and binary-size increase for ITHICA transformations — and different block-size configurations — compared to cpu-check (uninstrumented baseline).
 
 | ITHICA Pass   | Arith (1) | Arith (2) | Arith (4) | Arith (8) | Arith (dep) | Mem  | MemDiv | Br   |
 |---------------|-----------|-----------|-----------|-----------|-------------|------|--------|------|
@@ -80,10 +82,11 @@ The central claim reproduced by this artifact is the per-pass **runtime overhead
 
 ### Getting started
 
-`scripts/build_pass.sh` builds the ITHICA pass named next to it:
+`cpu-check-ae/scripts/build_pass.sh` builds the ITHICA pass named next to it:
 
 ```bash
-scripts/build_pass.sh arith   # or mem|memdiv|br|...
+cd cpu-check-ae
+scripts/build_pass.sh arith   # or mem|memdiv|br|arithmem|...
 ```
 
 ### Building the two programs
@@ -107,13 +110,15 @@ scripts/build.sh --bench=hashing --nopass      # baseline
 scripts/build.sh --bench=hashing --pass=arith  # ITHICA
 ```
 
-Each `build.sh --pass=P` (for cpu-check) run copies its binary into `built/P_cpu_check`; each `--bench=B` (for FleetBench) run extracts a self-contained bundle (with the benchmark's required runfiles) into `built/B_baseline` or `built/B_arith`.
+Since `proto` and `stl-cord` take hours to build, pre-built binaries in `Binaries/` can be used directly for the next step (Measuring) by supplying `--fb-dir=Binaries` to the measuring script.
+
+Each `build.sh --pass=P` (for cpu-check) copies its binary into `built/P_cpu_check`; each `--bench=B` (for FleetBench) run extracts a self-contained bundle (with the benchmark's required runfiles) into `built/B_baseline` or `built/B_arith`.
 
 > **Note:** the `build.sh` scripts are independent of `build_pass.sh`: each rebuilds the ITHICA pass itself before compiling the program, and emits verbose logs, including a "Running on function" message per compiled function confirming that the pass is applied throughout the program.
 
 ### Measuring
 
-`measure.sh` runs the binaries in the directory specified with `--cc-dir=<dir>` (cpu-check) or `--fb-dir=<dir>` (FleetBench) — e.g., `built` from the step above. The directory must contain the uninstrumented baseline and at least one ITHICA-instrumented binary, otherwise the script exits with an error. Pre-built binaries ship in `Binaries/` but are not guaranteed to run on all hosts (§Notes).
+`measure.sh` runs the binaries in the directory specified with `--cc-dir=<dir>` (cpu-check) or `--fb-dir=<dir>` (FleetBench) — e.g., `built` from the step above. The directory must contain the uninstrumented baseline and at least one ITHICA-instrumented binary. Pre-built binaries in `Binaries/` can be used by supplying `--cc-dir=Binaries` (§Notes) to directly reproduce Table 11.
 
 ### E1 — For cpu-check
 
@@ -121,7 +126,7 @@ Performance overhead and binary-size increase (main result; ~40 min for all Tabl
 
 ```bash
 cd cpu-check-ae
-scripts/measure.sh --sec=120 --cc-dir=built
+scripts/measure.sh --sec=120 --cc-dir=(built||Binaries)
 # -> results/cpucheck_results.txt   (table)
 #    results/logs/*.out             (raw binary outputs)
 ```
@@ -136,7 +141,7 @@ Same metrics as E1, with vs. without Arith (~25 min for all six benchmarks). To 
 
 ```bash
 cd fleetbench-ae
-scripts/measure.sh --sec=120 --fb-dir=built
+scripts/measure.sh --sec=120 --fb-dir=(built||Binaries)
 # -> results/fleetbench_results.txt (perf)
 #    results/fleetbench_sizes.txt   (size)
 #    results/logs/*.out             (raw binary outputs)
@@ -144,7 +149,7 @@ scripts/measure.sh --sec=120 --fb-dir=built
 
 Each benchmark reports time per operation; the overhead is the ratio of the instrumented to the baseline median ns/op.
 
-**Expected Result:** Similar to the table below (subset of sub-benchmarks).
+**Expected Result:** Similar to the table below (only a subset of sub-benchmarks are reported for each of the six benchmarks).
 
 **Table: FleetBench runtime overhead and binary-size increase** with Arith vs. uninstrumented baseline. Measured on the reference host of Table 11. Results can vary depending on the underlying hardware. Only one sub-benchmark per benchmark family reported here. Not part of the main paper results.
 
@@ -160,7 +165,7 @@ Each benchmark reports time per operation; the overhead is the ratio of the inst
 ## Experiment customization
 
 - **Pass selection:** `arith`, `mem`, `memdiv`, `br`, plus the combinations `arithmem`, `arithmemdiv`, `arithmemdivbr`.
-- **Pass configuration parameters:** `make PASS=arith BLOCKSIZE=X INTERLEAVING=Y`, with `X`, `Y` ∈ {0, 1, 2, 4, 8}.
+- **Pass configuration parameters:** `--blocksize=X`, `--interleaving=Y`, with `X`, `Y` ∈ {0, 1, 2, 4, 8}.
 - **Run duration:** `scripts/measure.sh --sec=N` sets the per-binary wall-clock budget (default 120).
 - **CPU set:** `measure.sh` automatically pins one worker per available CPU (§Notes); for a manual `cpu_check` run, restrict the workers with `-c<list>`.
 
@@ -168,4 +173,4 @@ Each benchmark reports time per operation; the overhead is the ratio of the inst
 
 - **Measurement stability.** The exact ratios in the two tables depend on the underlying hardware, including core count, hyperthreading, and AVX support. Because the Table 6 servers have very high core counts, a host with at least 32 cores is recommended for comparable results (§Hardware dependencies). Ratios also vary run to run on the same hardware, from frequency scaling or co-location with other load; the default 120 sec runs average over short-term fluctuation, but some variation remains.
 - **Thread placement.** cpu-check sizes its worker pool from `std::thread::hardware_concurrency()` and spawns one worker per logical CPU, independent of cgroup/affinity limits; on a restricted host this over-spawns and distorts the measurement. The scripts pass an explicit `-c` list so exactly one worker runs per available CPU.
-- **Slow builds.** Some programs can take 1–2 hours to compile (e.g., stl-cord and proto from FleetBench). Pre-built versions of all evaluated binaries are provided inside `Binaries/`. Pre-built binaries are not guaranteed to run on any hardware.
+- **Slow builds.** Pre-built versions of all evaluated binaries are provided in `Binaries/` to save build time. Pre-built binaries are not guaranteed to run on any hardware.
