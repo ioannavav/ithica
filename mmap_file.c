@@ -12,7 +12,6 @@
 
 #define MAX_BUFFER_SIZE 1024
 
-
 void print_cpu_id() {
 	int cpu = sched_getcpu();
 	printf("Running on CPU: %d\n", cpu);
@@ -50,8 +49,8 @@ int incr_err(unsigned int block, unsigned int total) {
 
   error_count++;
 
-  // Stop printing after limit.
-  if (error_count > 1000) {
+  // Stop printing after set limit.
+  if (error_count > 100000) {
 		print_enabled = 0;
     printf("Stopping printing by design......");
 	}	
@@ -118,4 +117,3 @@ int * printMemoryAsHex(volatile const unsigned char * buff1, int sizeInBytes1, v
 
     return 0;
 }
-
