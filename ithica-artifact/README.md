@@ -19,13 +19,13 @@ This artifact includes the ITHICA LLVM IR passes (Arith, Mem, MemDiv, Br, and th
 - **Publicly available?:** yes (de-anonymized github link will be provided after shepherding): https://anonymous.4open.science/r/ithica-sdc
 - **Code licenses (if publicly available)?:** MIT
 - **Workflow automation framework used?:** Docker.
-- **Archived (provide DOI)?:** **[TODO: Zenodo DOI]**
+- **Archived (provide DOI)?:** https://zenodo.org/records/21554153
 
 ## Description
 
 ### How to access
 
-The artifact is a source repository at **[TODO: public repository URL]**, archived on Zenodo (DOI above).
+The artifact is archived on Zenodo (DOI above).
 
 The artifact contains two directories, `cpu-check-ae/` and `fleetbench-ae/`, one per program. Each holds the ITHICA pass sources, the pinned program source, the pinned toolchain, pre-built binaries (to avoid heavy recompilation of some programs if needed), and three driver scripts: `setup.sh` provisions the toolchain, `build.sh` compiles the program with a chosen ITHICA pass, and `measure.sh` runs the (resulting or pre-built) binaries and reports the metrics.
 
