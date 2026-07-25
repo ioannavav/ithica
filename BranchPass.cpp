@@ -15,6 +15,7 @@
 #include <iterator>
 #include <vector>
 #include <map>
+#include <set>
 
 using namespace llvm;
 static std::map<unsigned, Function*> NoOpFunctionRegistry;
@@ -29,6 +30,7 @@ namespace {
         static unsigned globalBlockCounter; // Global unique block ID across all functions
         static unsigned totalBasicBlocks;   // Total number of basic blocks across functions
         static bool countedBlocks;          // Ensure basic blocks are counted only once
+        static unsigned totalFunctions;
 
         // Helper function to convert an instruction to a string
         std::string instructionToString(Instruction *I) {
@@ -67,8 +69,11 @@ namespace {
         // Exclude certain functions from being processed
         bool isExcludedFunction(Function *F) {
             static const std::set<std::string> ExcludedFunctions = {
-                // Excluded functions to avoid false positives due to multithreading.
-                "Function_to_exclude",
+                // Excluded functions
+                "ossl_lh_strcasehash", "OPENSSL_LH_insert", "CRYPTO_set_ex_data", 
+				"ossl_sa_set", "CRYPTO_zalloc", "OPENSSL_LH_doall_arg", "obj_name_cmp",
+				"_ZN8tcmalloc17tcmalloc_internal", "SymbolizeEPK",
+				"Add other functions to exclude"
             };
             for (const auto &excludedName : ExcludedFunctions) {
                 if (F->getName().str().find(excludedName) != std::string::npos) {
@@ -76,6 +81,16 @@ namespace {
                 }
             }
             return false;
+        }
+
+        // Get an existing thread-local global by name, or create it (internal linkage).
+        GlobalVariable *getOrCreateThreadLocalGlobal(Module *M, Type *ty, Constant *init, StringRef name) {
+            GlobalVariable *gv = M->getNamedGlobal(name);
+            if (!gv) {
+                gv = new GlobalVariable(*M, ty, false, GlobalValue::InternalLinkage, init, name);
+                gv->setThreadLocal(true);
+            }
+            return gv;
         }
 
         // Function to insert ID check at the beginning of a basic block
@@ -107,7 +122,7 @@ namespace {
             IRBuilder<> builder(firstInst);
 
             // Load the value of branchCheckingON
-            Value *branchCheckEnabled = builder.CreateLoad(Type::getInt1Ty(Ctx), branchCheckingON);
+            Value *branchCheckEnabled = builder.CreateLoad(Type::getInt1Ty(Ctx), branchCheckingON, true);
 
             // Split the block at the first instruction, creating a new block for the instructions after the split
             BasicBlock *origBB = BB->splitBasicBlock(firstInst, "origBB");
@@ -140,7 +155,7 @@ namespace {
 
             // Build the thenBB block (executed if IDs match)
             IRBuilder<> thenBuilder(thenBB);
-            thenBuilder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true), branchCheckingON);
+            thenBuilder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), false), branchCheckingON, true); 
             thenBuilder.CreateBr(origBB);  // Continue to the original instructions
 
             // Build the errorBB block (executed if IDs do not match)
@@ -153,11 +168,75 @@ namespace {
             llvm::Value* libraryNameArg = errorBuilder.CreateGlobalStringPtr(LIBRARYNAME);
             errorBuilder.CreateCall(fprintFunc, errorBuilder.CreateGlobalStringPtr("Error occurred on: "));
             errorBuilder.CreateCall(printDateFunc, libraryNameArg);
-            errorBuilder.CreateRet(ConstantInt::get(Type::getInt32Ty(Ctx), -1));
+
+            // Detection = halt, after logging. We do NOT emit `ret <i32>` here:
+            // (1) it is malformed IR in any function whose return type is not i32
+            //     (void/pointer/struct returns), and
+            // (2) returning a fabricated value would let a corrupted execution
+            //     continue past a detected control-flow fault.
+            // Reporting spans BOTH stdout (print_cpu_id / print_date use printf)
+            // and stderr (fprintFunc), and stdout is fully buffered when output
+            // is redirected -- so we flush ALL stdio streams before terminating,
+            // otherwise the CPU-id / date lines would be lost under abort().
+            // abort() is noreturn, so the trailing `unreachable` is genuinely
+            // unreachable and does NOT let the optimizer prove the check always
+            // succeeds and delete it (a bare `unreachable` here would).
+            FunctionCallee fflushFunc = F.getParent()->getOrInsertFunction(
+                "fflush", FunctionType::get(Type::getInt32Ty(Ctx),
+                PointerType::get(Type::getInt8Ty(Ctx), 0)));
+            FunctionCallee abortFunc = F.getParent()->getOrInsertFunction(
+                "abort", FunctionType::get(Type::getVoidTy(Ctx), false));
+            if (Function *abortDecl = dyn_cast<Function>(abortFunc.getCallee())) {
+                abortDecl->setDoesNotReturn();
+            }
+            errorBuilder.CreateCall(fflushFunc,
+                ConstantPointerNull::get(PointerType::get(Type::getInt8Ty(Ctx), 0)));  // fflush(NULL)
+            errorBuilder.CreateCall(abortFunc);
+            errorBuilder.CreateUnreachable();
 
             // Build the skipCheckBB block (executed if branch checking is not enabled)
             IRBuilder<> skipBuilder(skipCheckBB);
             skipBuilder.CreateBr(origBB);  // Continue with the original instructions
+        }
+
+        // Instrument one conditional branch: record the expected target ID for the taken
+        // edge, then insert the matching ID check in both successor blocks.
+        void instrumentConditionalBranch(
+            BranchInst *condBranchInst,
+            BasicBlock *BB,
+            LLVMContext &Ctx,
+            Function &F,
+            std::map<BasicBlock*, unsigned> &blockIDMap,
+            GlobalVariable *branchTargetAddress,
+            GlobalVariable *branchCheckingON,
+            FunctionCallee fprintFunc,
+            FunctionCallee printCPUFunc,
+            FunctionCallee printDateFunc,
+            std::set<BasicBlock*> &blocksWithCheck) {
+
+            BasicBlock *trueTarget = condBranchInst->getSuccessor(0);
+            BasicBlock *falseTarget = condBranchInst->getSuccessor(1);
+            errs() << "Conditional branch found in basic block " << blockIDMap[BB]
+                   << " of function " << F.getName()
+                   << " with true target: " << blockIDMap[trueTarget]
+                   << " and false target: " << blockIDMap[falseTarget] << "\n";
+
+            // Insert code to save the expected block ID based on the condition value
+            IRBuilder<> builder(condBranchInst);
+            Value *trueTargetID = ConstantInt::get(Type::getInt32Ty(Ctx), blockIDMap[trueTarget]);
+            Value *falseTargetID = ConstantInt::get(Type::getInt32Ty(Ctx), blockIDMap[falseTarget]);
+            Value *cond = condBranchInst->getCondition();
+            Value *expectedID = builder.CreateSelect(cond, trueTargetID, falseTargetID);
+            builder.CreateStore(expectedID, branchTargetAddress, true);
+            builder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true), branchCheckingON, true);
+
+            // Insert ID checks in the target basic blocks
+            insertIDCheck(Ctx, trueTarget, blockIDMap[trueTarget],
+                          branchTargetAddress, branchCheckingON,
+                          fprintFunc, printCPUFunc, printDateFunc, F, blocksWithCheck);
+            insertIDCheck(Ctx, falseTarget, blockIDMap[falseTarget],
+                          branchTargetAddress, branchCheckingON,
+                          fprintFunc, printCPUFunc, printDateFunc, F, blocksWithCheck);
         }
 
         bool runOnFunction(Function &F) override {
@@ -167,6 +246,8 @@ namespace {
             }
 
             LLVMContext &Ctx = F.getContext();
+            totalFunctions ++;
+            // errs() << " Running on function: " << F.getName() <<  "  with ID: " <<  totalFunctions << "\n";
 
             // Declare external functions used for printing and error handling
             FunctionCallee fprintFunc = F.getParent()->getOrInsertFunction(
@@ -180,23 +261,13 @@ namespace {
                 "print_date", FunctionType::get(Type::getVoidTy(Ctx), Type::getInt8PtrTy(Ctx), false));
 
             // Get or create the global variables for branch target address and branch checking ON
-            GlobalVariable* branchTargetAddress = F.getParent()->getNamedGlobal("llvmPassBranchTargetAddress");
-            if (!branchTargetAddress) {
-                branchTargetAddress = new GlobalVariable(
-                    *F.getParent(), Type::getInt32Ty(Ctx), false,
-                    GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt32Ty(Ctx), 0),
-                    "llvmPassBranchTargetAddress");
-                branchTargetAddress->setThreadLocal(true); // Make it thread-local
-            }
+            GlobalVariable* branchTargetAddress = getOrCreateThreadLocalGlobal(
+                F.getParent(), Type::getInt32Ty(Ctx),
+                ConstantInt::get(Type::getInt32Ty(Ctx), 0), "llvmPassBranchTargetAddress");
 
-            GlobalVariable* branchCheckingON = F.getParent()->getNamedGlobal("llvmPassBranchCheckingON");
-            if (!branchCheckingON) {
-                branchCheckingON = new GlobalVariable(
-                    *F.getParent(), Type::getInt1Ty(Ctx), false,
-                    GlobalValue::InternalLinkage, ConstantInt::get(Type::getInt1Ty(Ctx), false),
-                    "llvmPassBranchCheckingON");
-                branchCheckingON->setThreadLocal(true); // Make it thread-local
-            }
+            GlobalVariable* branchCheckingON = getOrCreateThreadLocalGlobal(
+                F.getParent(), Type::getInt1Ty(Ctx),
+                ConstantInt::get(Type::getInt1Ty(Ctx), false), "llvmPassBranchCheckingON");
 
             // Initialize data structures for processing
             std::vector<BasicBlock*> bbs;
@@ -209,22 +280,28 @@ namespace {
                 blockIDMap[&BB] = globalBlockCounter++; // Assign a global unique block ID
             }
 
-            // If this is the first time, collect basic blocks and their instructions
-            if (!countedBlocks) {
-                for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI) {
-                    BasicBlock *BB = &*BI;
-                    bbs.push_back(BB);
+            // Collect THIS function's basic blocks and their instrumentable
+            // instructions. This is per-function state and must run for every
+            // function -- it must NOT be gated by countedBlocks. (countedBlocks
+            // is static and persists across every runOnFunction call in a
+            // process; gating this collection behind it caused only the first
+            // function per module/TU to be instrumented.)
+            for (Function::iterator BI = F.begin(), BE = F.end(); BI != BE; ++BI) {
+                BasicBlock *BB = &*BI;
+                bbs.push_back(BB);
 
-                    std::vector<Instruction*> originalInstructions;
-                    for (Instruction &I : *BB) {
-                        if (!isExcludedInstruction(&I)) {
-                            originalInstructions.push_back(&I);
-                        }
+                std::vector<Instruction*> originalInstructions;
+                for (Instruction &I : *BB) {
+                    if (!isExcludedInstruction(&I)) {
+                        originalInstructions.push_back(&I);
                     }
-                    blockInstructionMap[BB] = originalInstructions;
                 }
+                blockInstructionMap[BB] = originalInstructions;
+            }
 
-                // Count total basic blocks in the module
+            // Count total basic blocks in the module. This IS genuinely
+            // module-wide, so it stays guarded to run once per module.
+            if (!countedBlocks) {
                 countBasicBlocks(F.getParent());
                 countedBlocks = true;
             }
@@ -241,36 +318,10 @@ namespace {
                 for (Instruction *Inst : blockInstructionMap[BB]) {
                     BranchInst *condBranchInst = dyn_cast<BranchInst>(Inst);
                     if (condBranchInst && condBranchInst->isConditional()) {
-                        // Found a conditional branch instruction
-                        BasicBlock *trueTarget = condBranchInst->getSuccessor(0);
-                        BasicBlock *falseTarget = condBranchInst->getSuccessor(1);
-                        errs() << "Conditional branch found in basic block " << blockIDMap[BB]
-                               << " with true target: " << blockIDMap[trueTarget]
-                               << " and false target: " << blockIDMap[falseTarget] << "\n";
-
-                        // Insert code to save the expected block ID based on the condition value
-                        IRBuilder<> builder(condBranchInst);
-
-                        // Create constants for the target block IDs
-                        Value *trueTargetID = ConstantInt::get(Type::getInt32Ty(Ctx), blockIDMap[trueTarget]);
-                        Value *falseTargetID = ConstantInt::get(Type::getInt32Ty(Ctx), blockIDMap[falseTarget]);
-
-                        // Depending on the branch condition, store the appropriate target ID
-                        Value *cond = condBranchInst->getCondition();
-                        Value *expectedID = builder.CreateSelect(cond, trueTargetID, falseTargetID);
-
-                        // Store the selected ID in the global variable branchTargetAddress
-                        builder.CreateStore(expectedID, branchTargetAddress, true);
-                        builder.CreateStore(ConstantInt::get(Type::getInt1Ty(Ctx), true), branchCheckingON);
-
-                        // Insert ID checks in the target basic blocks
-                        insertIDCheck(Ctx, trueTarget, blockIDMap[trueTarget],
-                                      branchTargetAddress, branchCheckingON,
-                                      fprintFunc, printCPUFunc, printDateFunc, F, blocksWithCheck);
-
-                        insertIDCheck(Ctx, falseTarget, blockIDMap[falseTarget],
-                                      branchTargetAddress, branchCheckingON,
-                                      fprintFunc, printCPUFunc, printDateFunc, F, blocksWithCheck);
+                        instrumentConditionalBranch(
+                            condBranchInst, BB, Ctx, F, blockIDMap,
+                            branchTargetAddress, branchCheckingON,
+                            fprintFunc, printCPUFunc, printDateFunc, blocksWithCheck);
                     }
                 }
                 blockCounter++;
@@ -296,6 +347,8 @@ unsigned BranchPass::blockCounter = 1;
 unsigned BranchPass::globalBlockCounter = 1;
 unsigned BranchPass::totalBasicBlocks = 0;
 bool BranchPass::countedBlocks = false;
+unsigned BranchPass::totalFunctions = 0;
+
 
 // Register the pass
 char BranchPass::ID = 0;
