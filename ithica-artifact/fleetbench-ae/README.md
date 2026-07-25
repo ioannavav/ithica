@@ -8,7 +8,7 @@ inside each bundle directory).
 ## Quick start
 
 ```bash
-scripts/measure.sh --fb-dir=prebuilt --sec=120   # measure the shipped pre-built bundles, write results/ (no build)
+scripts/measure.sh --fb-dir=Binaries --sec=120   # measure the shipped pre-built bundles, write results/ (no build)
 scripts/measure.sh --fb-dir=built    --sec=120   # measure bundles you rebuilt with build.sh (see below)
 scripts/setup.sh                               # build the toolchain image      (only needed to rebuild)
 scripts/build.sh --bench=hashing --pass=arith  # (optional) rebuild one benchmark, instrumented

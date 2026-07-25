@@ -6,7 +6,7 @@
 #
 #   --sec       ~seconds of wall time budgeted per benchmark (default 120)
 #   --out        output directory (default ./results)
-#   --fb-dir     REQUIRED -- which bundles to measure: prebuilt (shipped
+#   --fb-dir     REQUIRED -- which bundles to measure: Binaries (shipped
 #                pre-built) or built (what you recompiled with build.sh)
 #   --in-docker  run this same measurement INSIDE the FleetBench image,
 #                bind-mounting the artifact dir (numbers match a host run)
@@ -30,9 +30,9 @@ esac; done
 
 if [ -z "$FB_DIR" ]; then
   echo "ERROR: choose which bundles to measure with --fb-dir=DIR:"
-  echo "   --fb-dir=prebuilt   the shipped pre-built FleetBench bundles"
+  echo "   --fb-dir=Binaries   the shipped pre-built FleetBench bundles"
   echo "   --fb-dir=built      bundles you recompiled with scripts/build.sh"
-  echo "example:  scripts/measure.sh --fb-dir=prebuilt --sec=120"
+  echo "example:  scripts/measure.sh --fb-dir=Binaries --sec=120"
   exit 2
 fi
 
