@@ -1,0 +1,46 @@
+# Copyright 2022 The Fleetbench Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""This package provides default compiler warning flags for the OSS release"""
+
+_ITHICA_PASS = [
+    "-flegacy-pass-manager",
+    "-Xclang", "-load", "-Xclang", "/opt/ithica/passes/pass.so",
+]
+TCMALLOC_LLVM_FLAGS = [
+    "-Werror", "-Wno-deprecated-declarations", "-Wno-deprecated-volatile",
+    "-Wno-implicit-int-float-conversion", "-Wno-sign-compare", "-Wno-uninitialized",
+    "-Wno-unused-function", "-Wno-unused-variable", "-O2", "-static",
+]
+TCMALLOC_GCC_FLAGS = [
+    # Ensure TCMalloc itself builds without errors, even if its dependencies
+    # aren't necessarily -Werror clean.
+    "-Werror",
+    "-Wno-attribute-alias",
+    "-Wno-sign-compare",
+    "-Wno-stringop-overflow",
+    "-Wno-uninitialized",
+    "-Wno-unused-function",
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66425
+    "-Wno-unused-result",
+    "-Wno-unused-variable",
+]
+
+TCMALLOC_DEFAULT_COPTS = select({
+    "//fleetbench:llvm": TCMALLOC_LLVM_FLAGS,
+    "//conditions:default": TCMALLOC_GCC_FLAGS,
+}) + select({
+    "//fleetbench:with_pass": _ITHICA_PASS,
+    "//conditions:default": [],
+})

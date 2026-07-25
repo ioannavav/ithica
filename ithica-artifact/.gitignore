@@ -1,0 +1,24 @@
+# Generated build outputs (recreated by build.sh / measure.sh / build_pass.sh)
+results/
+built/
+passes/
+*_install_bs*/
+
+# cpu-check dependency sources cloned on first build (~4 GB)
+third_party/zlib/
+third_party/abseil-cpp/
+third_party/openssl/
+third_party/llvm-project/
+
+# Large prebuilt artifacts + packed toolchain image live on Zenodo, not in git
+Binaries/
+prebuilt/
+*.tar.gz
+*.tar.gz.sha256
+
+# Editor / OS cruft
+*.swp
+.DS_Store
+
+# stray compiled benchmark binaries that leaked into the fleetbench source
+fleetbench-ae/context/fleetbench/empirical_driver

@@ -1,0 +1,99 @@
+# Copyright 2022 The Fleetbench Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Require c++17 for c++ files.
+build --cxxopt='-std=c++17'
+build --host_cxxopt='-std=c++17'
+
+# Disable Bazel module support, which breaks compilation of protobuf with
+# Bazel 7.0.0: it pulls in a version of protobuf that is older than the one
+# specified in WORKSPACE, and the two versions clash.
+build --noenable_bzlmod
+
+# Enable libpfm (performance counters) by default.
+build --define=pfm=1
+
+test --test_timeout=1500
+
+# Define the --config=asan-libfuzzer configuration.
+build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine=@rules_fuzzing//fuzzing/engines:libfuzzer
+build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine_instrumentation=libfuzzer
+build:asan-libfuzzer --@rules_fuzzing//fuzzing:cc_engine_sanitizer=asan
+
+# Common compiler flags.
+build --copt='-fno-exceptions'
+build --copt='-funsigned-char'
+build --copt='-fno-strict-aliasing'
+build --copt='-fno-omit-frame-pointer'
+
+# Optimized build. Prefer this for benchmarking.
+build:opt --compilation_mode=opt
+build:opt --copt='-O3'
+build:opt --copt='-momit-leaf-frame-pointer'
+
+# TODO(rjogrady)- enable PIE in opt mode. This doesn't work with libpfm.
+# build:opt --force_pic
+
+# Clang-specific flags and settings.
+# Define --config=clang. clang must be in the PATH.
+build:clang --repo_env=CC=clang --repo_env=CXX=clang++
+# Prevent warnings about gcc-specific arguments from --fdo_optimize.
+build:clang --copt='-Wno-ignored-optimization-argument'
+# Allow instrprof_error::hash_mismatch profiles.
+build:clang --copt='-Wno-error=backend-plugin'
+build:clang --copt='-faligned-allocation'
+build:clang --copt='-fnew-alignment=8'
+
+# Cache clang artifacts in a different directory.
+build:clang --platform_suffix=clang
+
+# Architecture-specific optimizations.
+build:haswell --copt='-march=haswell'
+build:haswell --copt='-m64'
+build:haswell --copt='-maes'
+build:haswell --copt='-mprefer-vector-width=128'
+
+build:westmere --copt='-march=westmere'
+build:westmere --copt='-m64'
+build:westmere --copt='-maes'
+build:westmere --copt='-mcx16'
+build:westmere --copt='-mpclmul'
+build:westmere --copt='-mprefer-vector-width=128'
+build:westmere --copt='-msse4.2'
+
+
+# Clang-14 specific configuration
+
+# ------------------------------------------------------------------
+# ITHICA instrumentation toolchain (clang-14 + legacy pass manager).
+# Baseline:      bazel build --config=clang-14 <target>
+# Instrumented:  bazel build --config=clang-14 --config=pass <target>
+# ------------------------------------------------------------------
+build:clang-14 --repo_env=CC=clang-14 --repo_env=CXX=clang++-14
+build:clang-14 --copt=-O2 --copt=-fno-stack-protector --copt=-fuse-ld=lld
+build:clang-14 --copt=-Wno-ignored-optimization-argument --copt=-Wno-error=backend-plugin
+build:clang-14 --copt=-faligned-allocation --copt=-fnew-alignment=8
+build:clang-14 --copt=-Wno-unused-command-line-argument
+build:clang-14 --platform_suffix=clang-14
+build --force_pic
+
+build:pass --define=ithica=on
+
+# The runtime helper is linked unconditionally, not only under --config=pass:
+# fleetbench/libc imports a pre-instrumented libllvmlibc.a, whose pass-inserted
+# calls (print_cpu_id, print_date, fprintFunc) must resolve in the baseline build
+# too. The helper only *defines* these symbols, so linking it into an
+# uninstrumented binary is inert.
+build --linkopt=/opt/ithica/passes/libpassmmap
+build --linkopt=/opt/ithica/passes/libpassInstrTracker
