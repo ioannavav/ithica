@@ -1,10 +1,3 @@
-# ITHICA Artifact Appendix
-
-> **Author TODOs before release:**
-> 1. Reserve a **Zenodo DOI** *before* the release (Zenodo's "Reserve DOI" button). Required for the ACM "Artifacts Available" badge — a GitHub URL alone does not qualify.
-> 2. Public repository URL.
-> 3. Confirm the ITHICA-pass license (MIT?). Keep the Apache-2.0 note for the vendored programs — redistributing them obliges stating their license.
-
 ## Abstract
 
 This artifact includes the ITHICA LLVM IR passes (Arith, Mem, MemDiv, Br, and their combinations) used to transform real programs into tests for hardware defects (first contribution in §1). It demonstrates that ITHICA passes successfully instrument the two programs used in the paper: cpu-check and FleetBench. For ease of use, the artifact provides a pinned Docker build environment per program (kept separate due to disjoint build requirements), containing all dependencies needed to compile both programs (with and without ITHICA) from source. The artifact reproduces the runtime overhead and binary-size increase that ITHICA transformations impose relative to the uninstrumented cpu-check baseline, as reported in Table 6 of the paper. Pre-built binaries for all configurations of Table 6 are provided to reproduce the measurements directly, even without recompilation. The remaining results (§7–§8) require access to proprietary defective hardware owned by the hyperscaler, and therefore cannot be reproduced.
@@ -74,7 +67,7 @@ ITHICA is not limited to these two programs: a small toy program (`toy_overhead/
 
 ## Evaluation and expected results
 
-**Table: Results equivalent to Table 6**, here measured on a non-industrial (non-proprietary) server. Performance overhead and binary-size increase for ITHICA transformations — and different block-size configurations — compared to cpu-check (uninstrumented baseline).
+**Table: Results equivalent to Table 6 in the paper**, here measured on a non-industrial (non-proprietary) server. Performance overhead and binary-size increase for ITHICA transformations — and different block-size configurations — compared to cpu-check (uninstrumented baseline).
 
 | ITHICA Pass   | Arith (1) | Arith (2) | Arith (4) | Arith (8) | Arith (dep) | Mem  | MemDiv | Br   |
 |---------------|-----------|-----------|-----------|-----------|-------------|------|--------|------|
