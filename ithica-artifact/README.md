@@ -27,7 +27,7 @@ This artifact includes the ITHICA LLVM IR passes (Arith, Mem, MemDiv, Br, and th
 
 ### How to access
 
-The artifact is archived on [Zenodo](https://zenodo.org/records/21554153) (also public in the [ITHICA-artifact](https://github.com/ioannavav/ithica/tree/main) repository).
+The artifact is archived on [Zenodo](https://zenodo.org/records/21554153). The source code is also public on [ITHICA-artifact](https://github.com/ioannavav/ithica/tree/main) repository. Use the Zenodo copy that contains prebuilt binaries and the toolchain image (excluded from the GitHub version) to execute the following scripts that reproduce the results of the paper.
 
 The artifact contains two directories, `cpu-check-ae/` and `fleetbench-ae/`, one per program. Each holds the ITHICA pass sources, the pinned program source, the pinned toolchain, pre-built binaries (to avoid heavy recompilation of some programs if needed), and three driver scripts: `setup.sh` provisions the toolchain, `build.sh` compiles the program with a chosen ITHICA pass, and `measure.sh` runs the (resulting or pre-built) binaries and reports the metrics.
 
