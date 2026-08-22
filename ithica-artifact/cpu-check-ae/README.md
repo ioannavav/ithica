@@ -7,6 +7,8 @@ without Docker or rebuilding.
 
 ## Quick start
 
+> The prebuilt `Binaries/` live in the **Zenodo** archive, not the GitHub mirror — download from Zenodo to run the commands below.
+
 ```bash
 scripts/measure.sh --cc-dir=Binaries --sec=120   # measure the shipped pre-built binaries, write results/ (no build, no Docker)
 scripts/measure.sh --cc-dir=built    --sec=120   # measure binaries you rebuilt with build.sh (see below)

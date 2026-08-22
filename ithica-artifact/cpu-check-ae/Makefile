@@ -103,6 +103,13 @@ PASS_SRC_arithmem      := ArithMemPass.cpp
 PASS_SRC_arithmemdiv   := ArithMemDivPass.cpp
 PASS_SRC_arithmemdivbr := ArithMemDivBrPass.cpp
 
+# Optional (secondary) -- not part of the default pass set. These "original"
+# variants reproduce the paper binary sizes (see README, "Binary sizes"); default
+# users should use the primary passes above. Build e.g.: make PASS=original_br
+PASS_SRC_original_mem    := Original_MemPass.cpp
+PASS_SRC_original_memdiv := Original_MemDivPass.cpp
+PASS_SRC_original_br     := Original_BranchPass.cpp
+
 # PASS=CC builds the uninstrumented baseline (no pass plugin loaded).
 ifeq ($(PASS),CC)
 PASS_SRC :=

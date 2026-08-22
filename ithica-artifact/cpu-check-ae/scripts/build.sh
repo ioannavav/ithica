@@ -68,8 +68,13 @@ if [ -x "$BIN" ]; then
   # Collect the result under the name measure.sh expects, so a reviewer can
   # measure the from-source builds with:  scripts/measure.sh --cc-dir=built
   mkdir -p "$SRC/built"
-  cp -f "$BIN" "$SRC/built/${PASS}_cpu_check"
-  echo ">> collected: built/${PASS}_cpu_check  (measure with: scripts/measure.sh --cc-dir=built)"
+  # Encode block size + interleaving in the collected name so different configs of
+  # the same pass (e.g. Arith at BLOCKSIZE 1/2/4/8/0) do not overwrite each other in
+  # built/ and each shows up as its own row in measure.sh. CC has no pass/config, so
+  # it keeps the plain name measure.sh recognises as the baseline.
+  if [ "$PASS" = "CC" ]; then DEST="built/CC_cpu_check"; else DEST="built/${PASS}_bs${BS}_intr${INTR}_cpu_check"; fi
+  cp -f "$BIN" "$SRC/$DEST"
+  echo ">> collected: $DEST  (measure with: scripts/measure.sh --cc-dir=built)"
 else
   echo ">> WARNING: expected binary not found at $BIN"; exit 1
 fi

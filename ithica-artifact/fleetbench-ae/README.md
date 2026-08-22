@@ -7,6 +7,8 @@ inside each bundle directory).
 
 ## Quick start
 
+> The prebuilt `Binaries/` bundles live in the **Zenodo** archive, not the GitHub mirror — download from Zenodo to run the commands below.
+
 ```bash
 scripts/measure.sh --fb-dir=Binaries --sec=120   # measure the shipped pre-built bundles, write results/ (no build)
 scripts/measure.sh --fb-dir=built    --sec=120   # measure bundles you rebuilt with build.sh (see below)

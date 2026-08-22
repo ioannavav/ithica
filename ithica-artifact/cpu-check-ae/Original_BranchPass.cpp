@@ -182,6 +182,7 @@ namespace {
             LLVMContext &Ctx = F.getContext();
             Module *M = F.getParent();
             totalFunctions++;
+            errs() << " Running on function: " << F.getName() <<  "  with ID: " <<  totalFunctions << "\n";
 
             // Declare external functions used for printing and error handling
             FunctionCallee fprintFunc = M->getOrInsertFunction(

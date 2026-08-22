@@ -112,7 +112,7 @@ scripts/build.sh --bench=hashing --pass=arith  # ITHICA
 
 Since `proto` and `stl-cord` take hours to build, pre-built binaries in `Binaries/` can be used directly for the next step (Measuring) by supplying `--fb-dir=Binaries` to the measuring script.
 
-Each `build.sh --pass=P` (for cpu-check) copies its binary into `built/P_cpu_check`; each `--bench=B` (for FleetBench) run extracts a self-contained bundle (with the benchmark's required runfiles) into `built/B_baseline` or `built/B_arith`.
+Each `build.sh --pass=P` (for cpu-check) copies its binary into `built/P_bs<BLOCKSIZE>_intr<INTERLEAVING>_cpu_check`; each `--bench=B` (for FleetBench) run extracts a self-contained bundle (with the benchmark's required runfiles) into `built/B_baseline` or `built/B_arith`.
 
 > **Note:** the `build.sh` scripts are independent of `build_pass.sh`: each rebuilds the ITHICA pass itself before compiling the program, and emits verbose logs, including a "Running on function" message per compiled function confirming that the pass is applied throughout the program.
 
