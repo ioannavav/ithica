@@ -45,7 +45,7 @@ Network access is required while building either image. On hosts where Docker's 
 
 ## Installation
 
-Installation provisions the pinned Docker toolchain of each program; the build steps in §Evaluation use these images.
+Use the Zenodo copy for the installation steps below and results reproduction using pre-built binaries. Installation provisions the pinned Docker toolchain of each program; the build steps in §Evaluation use these images.
 
 **For cpu-check:**
 
@@ -133,7 +133,8 @@ scripts/measure.sh --sec=120 --cc-dir=(built||Binaries)
 
 Each binary runs for a fixed budget (120 seconds); the overhead is the ratio of cpu-check's to the instrumented binary's throughput of rounds ("SUCCESSES" in raw logs) completed within the specified time.
 
-**Expected Result:** Similar to the table above, also on par with the average (Avg) ratios in Table 6. The exact ratios will vary based on the hardware used (see §Notes). Binary sizes might slightly differ too, due to new log messages added for better user experience.
+**Expected Result:** Similar to the table above, also on par with the average (Avg) ratios in Table 6. The exact ratios will vary based on the hardware used (see §Notes). Binary sizes might differ too, due to logging and structural changes for better user experience, code readability, and homogeneity across passes.
+
 
 ### E2 — For FleetBench
 
